@@ -1,0 +1,226 @@
+name: iOS CI and TestFlight
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PROJECT_PATH: Picscry.xcodeproj
+  SCHEME: Picscry
+  BUNDLE_IDENTIFIER: com.novanticai.picscry
+  SIMULATOR_NAME: iPhone 16
+  XCODE_APP: /Applications/Xcode_16.4.app
+
+jobs:
+  test:
+    name: Build and Test
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          if [ -d "$XCODE_APP" ]; then
+            sudo xcode-select -s "$XCODE_APP"
+          else
+            echo "$XCODE_APP was not found; using the runner default Xcode."
+          fi
+          xcodebuild -version
+          xcrun simctl list runtimes
+
+      - name: Build and run unit tests
+        run: |
+          set -o pipefail
+          mkdir -p TestResults
+          xcodebuild test \
+            -project "$PROJECT_PATH" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,name=$SIMULATOR_NAME,OS=latest" \
+            -resultBundlePath TestResults/Picscry.xcresult \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Upload test result bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Picscry.xcresult
+          path: TestResults/Picscry.xcresult
+          if-no-files-found: ignore
+
+  deploy-testflight:
+    name: Upload to TestFlight
+    runs-on: macos-15
+    timeout-minutes: 75
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    env:
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+      APP_STORE_CONNECT_IN_HOUSE: ${{ secrets.APP_STORE_CONNECT_IN_HOUSE }}
+      IOS_DISTRIBUTION_CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
+      IOS_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+      IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+      IOS_PROVISIONING_PROFILE_NAME: ${{ secrets.IOS_PROVISIONING_PROFILE_NAME }}
+      TESTFLIGHT_INTERNAL_GROUP: ${{ vars.TESTFLIGHT_INTERNAL_GROUP || 'Internal Testing' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          if [ -d "$XCODE_APP" ]; then
+            sudo xcode-select -s "$XCODE_APP"
+          else
+            echo "$XCODE_APP was not found; using the runner default Xcode."
+          fi
+          xcodebuild -version
+
+      - name: Validate release secrets
+        run: |
+          missing=0
+          for name in \
+            APPLE_TEAM_ID \
+            APP_STORE_CONNECT_KEY_ID \
+            APP_STORE_CONNECT_ISSUER_ID \
+            APP_STORE_CONNECT_API_KEY_P8 \
+            IOS_DISTRIBUTION_CERTIFICATE_BASE64 \
+            IOS_DISTRIBUTION_CERTIFICATE_PASSWORD \
+            IOS_PROVISIONING_PROFILE_BASE64 \
+            IOS_PROVISIONING_PROFILE_NAME
+          do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required for TestFlight deployment."
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Install signing certificate and provisioning profile
+        env:
+          KEYCHAIN_PASSWORD: ${{ runner.temp }}-${{ github.run_id }}
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/distribution.p12"
+          PROFILE_PATH="$RUNNER_TEMP/profile.mobileprovision"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+
+          echo "$IOS_DISTRIBUTION_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          echo "$IOS_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -P "$IOS_DISTRIBUTION_CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin <<< "$(security cms -D -i "$PROFILE_PATH")")
+          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+
+      - name: Archive app
+        run: |
+          set -o pipefail
+          ARCHIVE_PATH="$RUNNER_TEMP/Picscry.xcarchive"
+          xcodebuild archive \
+            -project "$PROJECT_PATH" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath "$ARCHIVE_PATH" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            PROVISIONING_PROFILE_SPECIFIER="$IOS_PROVISIONING_PROFILE_NAME" \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER"
+
+      - name: Export IPA
+        run: |
+          EXPORT_OPTIONS="$RUNNER_TEMP/ExportOptions.plist"
+          EXPORT_PATH="$RUNNER_TEMP/export"
+
+          cat > "$EXPORT_OPTIONS" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>destination</key>
+            <string>export</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>teamID</key>
+            <string>$APPLE_TEAM_ID</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>$BUNDLE_IDENTIFIER</key>
+              <string>$IOS_PROVISIONING_PROFILE_NAME</string>
+            </dict>
+            <key>stripSwiftSymbols</key>
+            <true/>
+            <key>uploadSymbols</key>
+            <true/>
+            <key>manageAppVersionAndBuildNumber</key>
+            <false/>
+          </dict>
+          </plist>
+          EOF
+
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Picscry.xcarchive" \
+            -exportOptionsPlist "$EXPORT_OPTIONS" \
+            -exportPath "$EXPORT_PATH"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Picscry.ipa
+          path: ${{ runner.temp }}/export/*.ipa
+
+      - name: Install fastlane
+        run: gem install fastlane --no-document
+
+      - name: Create App Store Connect API key
+        run: |
+          ruby -rjson -e '
+            File.write(
+              ENV.fetch("RUNNER_TEMP") + "/asc_api_key.json",
+              JSON.pretty_generate({
+                key_id: ENV.fetch("APP_STORE_CONNECT_KEY_ID"),
+                issuer_id: ENV.fetch("APP_STORE_CONNECT_ISSUER_ID"),
+                key: ENV.fetch("APP_STORE_CONNECT_API_KEY_P8"),
+                duration: 1200,
+                in_house: ENV.fetch("APP_STORE_CONNECT_IN_HOUSE", "false") == "true"
+              })
+            )
+          '
+
+      - name: Upload and assign build to internal TestFlight group
+        run: |
+          IPA_PATH=$(find "$RUNNER_TEMP/export" -name "*.ipa" -print -quit)
+          fastlane pilot upload \
+            --api_key_path "$RUNNER_TEMP/asc_api_key.json" \
+            --ipa "$IPA_PATH" \
+            --groups "$TESTFLIGHT_INTERNAL_GROUP" \
+            --skip_waiting_for_build_processing false \
+            --distribute_external false \
+            --notify_external_testers false
