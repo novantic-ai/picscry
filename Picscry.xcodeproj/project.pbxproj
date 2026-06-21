@@ -19,6 +19,8 @@
 		A1000000000000000000000A /* PhotoDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001A /* PhotoDetailView.swift */; };
 		A1000000000000000000000B /* EmptyStateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001B /* EmptyStateView.swift */; };
 		A1000000000000000000000C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001C /* Assets.xcassets */; };
+		A1000000000000000000000E /* Diagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001F /* Diagnostics.swift */; };
+		A1000000000000000000000F /* DiagnosticsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000021 /* DiagnosticsView.swift */; };
 		B20000000000000000000001 /* PicscryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000011 /* PicscryTests.swift */; };
 /* End PBXBuildFile section */
 
@@ -38,6 +40,8 @@
 		A1000000000000000000001C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A1000000000000000000001D /* Picscry.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Picscry.entitlements; sourceTree = "<group>"; };
 		A1000000000000000000001E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A1000000000000000000001F /* Diagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics.swift; sourceTree = "<group>"; };
+		A10000000000000000000021 /* DiagnosticsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsView.swift; sourceTree = "<group>"; };
 		B2000000000000000000000D /* PicscryTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PicscryTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B20000000000000000000011 /* PicscryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PicscryTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -107,6 +111,7 @@
 			children = (
 				A10000000000000000000013 /* AuthenticationStore.swift */,
 				A10000000000000000000015 /* PhotoLibraryStore.swift */,
+				A1000000000000000000001F /* Diagnostics.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -119,6 +124,7 @@
 				A10000000000000000000019 /* PhotoThumbnailView.swift */,
 				A1000000000000000000001A /* PhotoDetailView.swift */,
 				A1000000000000000000001B /* EmptyStateView.swift */,
+				A10000000000000000000021 /* DiagnosticsView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -251,6 +257,8 @@
 				A10000000000000000000009 /* PhotoThumbnailView.swift in Sources */,
 				A1000000000000000000000A /* PhotoDetailView.swift in Sources */,
 				A1000000000000000000000B /* EmptyStateView.swift in Sources */,
+				A1000000000000000000000E /* Diagnostics.swift in Sources */,
+				A1000000000000000000000F /* DiagnosticsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

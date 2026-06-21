@@ -6,6 +6,7 @@ struct LibraryView: View {
     @Environment(PhotoLibraryStore.self) private var photoLibraryStore
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @State private var selectedAsset: PhotoAssetSummary?
+    @State private var isShowingDiagnostics = false
 
     private let columns = [
         GridItem(.adaptive(minimum: 156, maximum: 220), spacing: 14)
@@ -21,6 +22,9 @@ struct LibraryView: View {
                             Button("Refresh", systemImage: "arrow.clockwise") {
                                 Task { await photoLibraryStore.reloadAssets() }
                             }
+                            Button("Diagnostics", systemImage: "stethoscope") {
+                                isShowingDiagnostics = true
+                            }
                             Button("Sign Out", systemImage: "rectangle.portrait.and.arrow.right") {
                                 authenticationStore.signOut()
                             }
@@ -32,6 +36,9 @@ struct LibraryView: View {
                 }
                 .sheet(item: $selectedAsset) { asset in
                     PhotoDetailView(asset: asset)
+                }
+                .sheet(isPresented: $isShowingDiagnostics) {
+                    DiagnosticsView()
                 }
         }
         .task {
@@ -53,8 +60,7 @@ struct LibraryView: View {
             )
         case .authorized, .limited:
             if photoLibraryStore.isLoading && photoLibraryStore.assets.isEmpty {
-                ProgressView("Loading Photos")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                loadingView
             } else if photoLibraryStore.assets.isEmpty {
                 EmptyStateView(
                     systemImage: "photo.stack",
@@ -95,6 +101,20 @@ struct LibraryView: View {
                     .padding(.bottom, 12)
             }
         }
+    }
+
+    private var loadingView: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+            Text("Loading Photos")
+                .font(.headline)
+            if photoLibraryStore.totalAssetCount > 0 {
+                Text("\(photoLibraryStore.assets.count) of \(photoLibraryStore.totalAssetCount)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var accessibleList: some View {

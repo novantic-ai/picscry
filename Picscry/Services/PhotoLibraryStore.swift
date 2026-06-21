@@ -23,17 +23,19 @@ final class PhotoLibraryStore: NSObject {
     var assets: [PhotoAssetSummary] = []
     var isLoading = false
     var errorMessage: String?
+    var totalAssetCount = 0
 
     private let imageManager = PHCachingImageManager()
     private var hasRegisteredChangeObserver = false
+    private var reloadTask: Task<Void, Never>?
 
     override init() {
         super.init()
         authorizationState = Self.authorizationState(from: PHPhotoLibrary.authorizationStatus(for: .readWrite))
-        registerForChangesIfNeeded()
     }
 
     deinit {
+        reloadTask?.cancel()
         PHPhotoLibrary.shared().unregisterChangeObserver(self)
     }
 
@@ -43,12 +45,16 @@ final class PhotoLibraryStore: NSObject {
 
         if authorizationState == .unknown {
             authorizationState = .requesting
+            Diagnostics.shared.log("Requesting PhotoKit read/write authorization.")
             let requestedStatus = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
             authorizationState = Self.authorizationState(from: requestedStatus)
+            Diagnostics.shared.log("PhotoKit authorization completed: \(authorizationState.diagnosticName).")
         }
 
         guard authorizationState.canReadLibrary else {
             assets = []
+            totalAssetCount = 0
+            Diagnostics.shared.log("Photo library unavailable: \(authorizationState.diagnosticName).")
             return
         }
 
@@ -58,19 +64,44 @@ final class PhotoLibraryStore: NSObject {
 
     func reloadAssets() async {
         guard authorizationState.canReadLibrary else { return }
+        reloadTask?.cancel()
         isLoading = true
         errorMessage = nil
+        assets = []
 
-        let fetchedAssets = fetchImageAssets()
-        assets = fetchedAssets
+        let result = fetchImageAssets()
+        totalAssetCount = result.count
+        Diagnostics.shared.log("Starting PhotoKit fetch for \(result.count) image assets.")
         imageManager.stopCachingImagesForAllAssets()
-        imageManager.startCachingImages(
-            for: fetchedAssets.compactMap { Self.asset(with: $0.id) },
-            targetSize: CGSize(width: 320, height: 320),
-            contentMode: .aspectFill,
-            options: nil
-        )
-        isLoading = false
+
+        let task = Task { @MainActor in
+            let batchSize = 150
+            var batch: [PhotoAssetSummary] = []
+            batch.reserveCapacity(batchSize)
+
+            for index in 0..<result.count {
+                guard !Task.isCancelled else {
+                    Diagnostics.shared.log("PhotoKit fetch cancelled after loading \(assets.count) summaries.")
+                    return
+                }
+
+                let asset = result.object(at: index)
+                batch.append(PhotoAssetSummary(asset: asset))
+
+                if batch.count == batchSize || index == result.count - 1 {
+                    assets.append(contentsOf: batch)
+                    batch.removeAll(keepingCapacity: true)
+                    Diagnostics.shared.log("Loaded \(assets.count) of \(result.count) photo summaries.")
+                    await Task.yield()
+                }
+            }
+
+            isLoading = false
+            Diagnostics.shared.log("Finished PhotoKit fetch with \(assets.count) photo summaries.")
+        }
+
+        reloadTask = task
+        await task.value
     }
 
     func thumbnail(for summary: PhotoAssetSummary, targetSize: CGSize) async -> UIImage? {
@@ -109,7 +140,7 @@ final class PhotoLibraryStore: NSObject {
             PhotoMetadataSection(
                 id: "resources",
                 title: "Resources",
-                items: resourceItems(for: summary.resourceSummaries)
+                items: resourceItems(for: PHAssetResource.assetResources(for: asset).map(PhotoResourceSummary.init(resource:)))
             )
         ]
 
@@ -126,18 +157,10 @@ final class PhotoLibraryStore: NSObject {
         return PhotoMetadata(sections: sections.filter { !$0.items.isEmpty })
     }
 
-    private func fetchImageAssets() -> [PhotoAssetSummary] {
+    private func fetchImageAssets() -> PHFetchResult<PHAsset> {
         let options = PHFetchOptions()
-        options.includeHiddenAssets = true
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        let result = PHAsset.fetchAssets(with: .image, options: options)
-
-        var summaries: [PhotoAssetSummary] = []
-        summaries.reserveCapacity(result.count)
-        result.enumerateObjects { asset, _, _ in
-            summaries.append(PhotoAssetSummary(asset: asset))
-        }
-        return summaries
+        return PHAsset.fetchAssets(with: .image, options: options)
     }
 
     private func libraryItems(for summary: PhotoAssetSummary) -> [PhotoMetadataItem] {
@@ -280,6 +303,19 @@ final class PhotoLibraryStore: NSObject {
 
     private static func asset(with localIdentifier: String) -> PHAsset? {
         PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil).firstObject
+    }
+}
+
+private extension PhotoLibraryStore.AuthorizationState {
+    var diagnosticName: String {
+        switch self {
+        case .unknown: "unknown"
+        case .requesting: "requesting"
+        case .authorized: "authorized"
+        case .limited: "limited"
+        case .denied: "denied"
+        case .restricted: "restricted"
+        }
     }
 }
 

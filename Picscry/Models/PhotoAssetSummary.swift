@@ -16,7 +16,6 @@ struct PhotoAssetSummary: Identifiable {
     let isHidden: Bool
     let burstIdentifier: String?
     let location: CLLocation?
-    let resourceSummaries: [PhotoResourceSummary]
 
     init(asset: PHAsset) {
         id = asset.localIdentifier
@@ -32,7 +31,6 @@ struct PhotoAssetSummary: Identifiable {
         isHidden = asset.isHidden
         burstIdentifier = asset.burstIdentifier
         location = asset.location
-        resourceSummaries = PHAssetResource.assetResources(for: asset).map(PhotoResourceSummary.init(resource:))
     }
 
     var displayTitle: String {

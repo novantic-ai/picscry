@@ -26,6 +26,7 @@ final class AuthenticationStore {
     func handleAuthorization(_ authorization: ASAuthorization) {
         guard let credential = authorization.credential as? ASAuthorizationAppleIDCredential else {
             errorMessage = "Apple did not return a usable credential."
+            Diagnostics.shared.log("Apple sign-in failed: no usable credential.")
             return
         }
 
@@ -39,19 +40,23 @@ final class AuthenticationStore {
 
         errorMessage = nil
         isSignedIn = true
+        Diagnostics.shared.log("Apple sign-in completed.")
     }
 
     func handleAuthorizationError(_ error: Error) {
         let authorizationError = error as? ASAuthorizationError
         if authorizationError?.code == .canceled {
+            Diagnostics.shared.log("Apple sign-in cancelled.")
             return
         }
         errorMessage = error.localizedDescription
+        Diagnostics.shared.log(error: error, context: "Apple sign-in failed")
     }
 
     func restoreCredentialState() async {
         guard let userIdentifier = defaults.string(forKey: DefaultsKey.appleUserIdentifier) else {
             isSignedIn = false
+            Diagnostics.shared.log("No saved Apple credential found.")
             return
         }
 
@@ -61,8 +66,10 @@ final class AuthenticationStore {
             if !isSignedIn {
                 clearSession()
             }
+            Diagnostics.shared.log("Apple credential restore state: \(state.rawValue).")
         } catch {
             errorMessage = error.localizedDescription
+            Diagnostics.shared.log(error: error, context: "Apple credential restore failed")
         }
     }
 
