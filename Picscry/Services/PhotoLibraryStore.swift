@@ -65,7 +65,7 @@ final class PhotoLibraryStore: NSObject {
         assets = fetchedAssets
         imageManager.stopCachingImagesForAllAssets()
         imageManager.startCachingImages(
-            for: fetchedAssets.compactMap(Self.asset(with:)),
+            for: fetchedAssets.compactMap { Self.asset(with: $0.id) },
             targetSize: CGSize(width: 320, height: 320),
             contentMode: .aspectFill,
             options: nil

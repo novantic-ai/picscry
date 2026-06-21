@@ -85,6 +85,7 @@ extension PHAssetResourceType {
         case .alternatePhoto: "Alternate Photo"
         case .fullSizePhoto: "Full Size Photo"
         case .fullSizeVideo: "Full Size Video"
+        case .adjustmentBaseVideo: "Adjustment Base Video"
         case .adjustmentData: "Adjustment Data"
         case .adjustmentBasePhoto: "Adjustment Base Photo"
         case .pairedVideo: "Live Photo Video"
