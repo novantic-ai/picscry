@@ -6,6 +6,7 @@ struct LibraryView: View {
     @Environment(PhotoLibraryStore.self) private var photoLibraryStore
     @State private var selectedAsset: PhotoAssetSummary?
     @State private var isShowingDiagnostics = false
+    @State private var mediaFilter: LibraryMediaFilter = .all
 
     private let columns = Array(
         repeating: GridItem(.flexible(minimum: 0), spacing: 2),
@@ -17,6 +18,20 @@ struct LibraryView: View {
             content
                 .navigationTitle("Library")
                 .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Menu {
+                            ForEach(LibraryMediaFilter.allCases) { filter in
+                                Button {
+                                    mediaFilter = filter
+                                } label: {
+                                    Label(filter.displayName, systemImage: mediaFilter == filter ? "checkmark" : filter.systemImage)
+                                }
+                            }
+                        } label: {
+                            Label("Filter", systemImage: "line.3.horizontal.decrease.circle")
+                                .accessibilityLabel("Filter library by media type")
+                        }
+                    }
                     ToolbarItem(placement: .topBarTrailing) {
                         Menu {
                             Button("Refresh", systemImage: "arrow.clockwise") {
@@ -35,7 +50,7 @@ struct LibraryView: View {
                     }
                 }
                 .sheet(item: $selectedAsset) { asset in
-                    PhotoDetailView(asset: asset)
+                    PhotoDetailView(assets: filteredAssets, initialAsset: asset)
                 }
                 .sheet(isPresented: $isShowingDiagnostics) {
                     DiagnosticsView()
@@ -61,7 +76,7 @@ struct LibraryView: View {
         case .authorized, .limited:
             if photoLibraryStore.isLoading && photoLibraryStore.assets.isEmpty {
                 loadingView
-            } else if photoLibraryStore.assets.isEmpty {
+            } else if filteredAssets.isEmpty {
                 EmptyStateView(
                     systemImage: "photo.stack",
                     title: "No Photos or Videos Found",
@@ -76,7 +91,7 @@ struct LibraryView: View {
     private var visualGrid: some View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 2) {
-                ForEach(photoLibraryStore.assets) { asset in
+                ForEach(filteredAssets) { asset in
                     Button {
                         selectedAsset = asset
                     } label: {
@@ -84,7 +99,7 @@ struct LibraryView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(asset.accessibilitySummary)
-                    .accessibilityHint("Opens all available metadata for this media item")
+                    .accessibilityHint("Opens this media item")
                 }
             }
             .padding(.horizontal, 2)
@@ -102,6 +117,10 @@ struct LibraryView: View {
         }
     }
 
+    private var filteredAssets: [PhotoAssetSummary] {
+        photoLibraryStore.assets.filter(mediaFilter.includes(_:))
+    }
+
     private var loadingView: some View {
         VStack(spacing: 12) {
             ProgressView()
@@ -116,6 +135,42 @@ struct LibraryView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+}
+
+private enum LibraryMediaFilter: String, CaseIterable, Identifiable {
+    case all
+    case photos
+    case screenshots
+    case videos
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .all: "All Media"
+        case .photos: "Photos"
+        case .screenshots: "Screenshots"
+        case .videos: "Videos"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .all: "photo.stack"
+        case .photos: "photo"
+        case .screenshots: "rectangle.dashed"
+        case .videos: "video"
+        }
+    }
+
+    func includes(_ asset: PhotoAssetSummary) -> Bool {
+        switch self {
+        case .all: true
+        case .photos: asset.mediaKind == .photo
+        case .screenshots: asset.mediaKind == .screenshot
+        case .videos: asset.mediaKind == .video
+        }
+    }
 }
 
 #Preview {

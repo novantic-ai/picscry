@@ -17,7 +17,7 @@ struct PhotoThumbnailView: View {
                     .aspectRatio(asset.aspectRatio, contentMode: .fit)
                     .frame(maxWidth: .infinity)
             } else {
-                Image(systemName: asset.isVideo ? "video" : "photo")
+                Image(systemName: asset.isVideo ? "video" : (asset.isScreenshot ? "rectangle.dashed" : "photo"))
                     .font(.title2)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
