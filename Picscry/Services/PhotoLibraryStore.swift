@@ -35,7 +35,6 @@ final class PhotoLibraryStore: NSObject {
     }
 
     deinit {
-        reloadTask?.cancel()
         PHPhotoLibrary.shared().unregisterChangeObserver(self)
     }
 
