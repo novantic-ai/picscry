@@ -13,13 +13,15 @@ struct PhotoThumbnailView: View {
             if let thumbnail {
                 Image(uiImage: thumbnail)
                     .resizable()
-                    .scaledToFill()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipped()
+                    .scaledToFit()
+                    .aspectRatio(asset.aspectRatio, contentMode: .fit)
+                    .frame(maxWidth: .infinity)
             } else {
                 Image(systemName: asset.isVideo ? "video" : "photo")
                     .font(.title2)
                     .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .aspectRatio(asset.aspectRatio, contentMode: .fit)
             }
 
             if asset.isVideo {
@@ -34,14 +36,16 @@ struct PhotoThumbnailView: View {
                     .accessibilityHidden(true)
             }
         }
-        .aspectRatio(1, contentMode: .fit)
+        .aspectRatio(asset.aspectRatio, contentMode: .fit)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(asset.accessibilitySummary)
         .task(id: asset.id) {
             thumbnail = await photoLibraryStore.thumbnail(
                 for: asset,
-                targetSize: CGSize(width: 440, height: 440)
+                targetSize: asset.thumbnailTargetSize,
+                deliveryMode: .highQualityFormat,
+                contentMode: .aspectFit
             )
         }
     }
