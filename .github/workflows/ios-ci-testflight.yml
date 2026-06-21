@@ -16,7 +16,7 @@ env:
   SCHEME: Picscry
   BUNDLE_IDENTIFIER: com.novanticai.picscry
   SIMULATOR_NAME: iPhone 16
-  XCODE_APP: /Applications/Xcode_16.4.app
+  XCODE_APP: /Applications/Xcode_26.3.app
 
 jobs:
   test:
