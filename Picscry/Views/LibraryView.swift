@@ -4,7 +4,6 @@ import SwiftUI
 struct LibraryView: View {
     @Environment(AuthenticationStore.self) private var authenticationStore
     @Environment(PhotoLibraryStore.self) private var photoLibraryStore
-    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @State private var selectedAsset: PhotoAssetSummary?
     @State private var isShowingDiagnostics = false
 
@@ -57,7 +56,7 @@ struct LibraryView: View {
             EmptyStateView(
                 systemImage: "lock.circle",
                 title: "Photo Access Needed",
-                message: "Allow photo library access in Settings to show your images and metadata."
+                message: "Allow photo library access in Settings to show your media and metadata."
             )
         case .authorized, .limited:
             if photoLibraryStore.isLoading && photoLibraryStore.assets.isEmpty {
@@ -68,8 +67,6 @@ struct LibraryView: View {
                     title: "No Photos or Videos Found",
                     message: "Picscry will show your imported photo and video library here once media is available."
                 )
-            } else if voiceOverEnabled {
-                accessibleList
             } else {
                 visualGrid
             }
@@ -119,24 +116,6 @@ struct LibraryView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var accessibleList: some View {
-        List(photoLibraryStore.assets) { asset in
-            Button {
-                selectedAsset = asset
-            } label: {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(asset.displayTitle)
-                        .font(.headline)
-                    Text(asset.accessibilitySummary)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.vertical, 4)
-            }
-            .accessibilityHint("Opens all available metadata for this media item")
-            .accessibilityLabel(asset.accessibilitySummary)
-        }
-    }
 }
 
 #Preview {

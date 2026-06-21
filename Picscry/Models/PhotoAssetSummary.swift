@@ -1,3 +1,4 @@
+import CoreGraphics
 import CoreLocation
 import Foundation
 import Photos
@@ -54,6 +55,21 @@ struct PhotoAssetSummary: Identifiable {
         }
 
         return "\(minutes):\(String(format: "%02d", seconds))"
+    }
+
+    var aspectRatio: CGFloat {
+        guard pixelWidth > 0, pixelHeight > 0 else { return 1 }
+        return CGFloat(pixelWidth) / CGFloat(pixelHeight)
+    }
+
+    var thumbnailTargetSize: CGSize {
+        let width: CGFloat = 720
+        return CGSize(width: width, height: max(1, width / aspectRatio))
+    }
+
+    var originalTargetSize: CGSize {
+        guard pixelWidth > 0, pixelHeight > 0 else { return PHImageManagerMaximumSize }
+        return CGSize(width: CGFloat(pixelWidth), height: CGFloat(pixelHeight))
     }
 
     var dimensionsText: String {

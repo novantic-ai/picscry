@@ -56,7 +56,9 @@ struct PhotoDetailView: View {
         .task(id: asset.id) {
             async let loadedThumbnail = photoLibraryStore.thumbnail(
                 for: asset,
-                targetSize: CGSize(width: 900, height: 900)
+                targetSize: asset.originalTargetSize,
+                deliveryMode: .highQualityFormat,
+                contentMode: .aspectFit
             )
             async let loadedMetadata = photoLibraryStore.metadata(for: asset)
             thumbnail = await loadedThumbnail

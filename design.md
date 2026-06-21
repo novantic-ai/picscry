@@ -203,14 +203,18 @@ To maintain high performance and stay within operating system battery optimizati
   3. **The Scout Processing Scope:** The background handler reads newly added photos, computes local feature prints, runs facial vector comparisons, determines duplicate clusters, and holds images ready for cloud calling.
   4. The background process must not attempt direct metadata writes or silent asset deletions. It updates a local database table named `PendingActionsQueue`. Deletions, API description calls, and system saves remain paused until the user launches the application in the foreground.
 
-## 6. Multi-Modal Accessibility UI/UX Design
+## 6. Unified Inclusive Accessibility UI/UX Design
 
-The interface adapts dynamically based on whether system screen reading tools are currently running.
+The app follows a unified inclusive design model. Accessibility settings may change labels, traits, focus order, hints, hit targets, captions, haptics, reduced-motion behavior, and other affordances, but they must not silently switch users into a materially different layout for the same workflow.
 
 ### 6.1 Unified User Interface Specification Matrix
 
-- **Visual Mode Layout (Sighted Focus):** Combines clean grid layouts with swipeable card queues. Images recommended for cleanups appear in stacked groupings. Swiping left flags the junk batch for deletion, while swiping right locks in the choice. A collapsible bottom drawer displays image stats, semantic keywords, social captions, and non-destructive image adjustments.
-- **Non-Visual Mode Layout (VoiceOver Focus):** Switches to an expanded list view container structure. The layout prioritizes simple, clean vertical accessibility traits over complex visual grids.
+- **Shared Workflow Layout:** Combines clean grid layouts with swipeable card queues. Images recommended for cleanups appear in stacked groupings. Swiping left flags the junk batch for deletion, while swiping right locks in the choice. A collapsible bottom drawer displays image stats, semantic keywords, social captions, and non-destructive image adjustments.
+- **Accessible Semantics:** The same workflow layout must expose clear accessibility labels, button traits, hints, captions, and predictable focus order rather than replacing the UI with a separate VoiceOver-only layout.
+- **Library Home Screen:** The library home screen is a media grid for both VoiceOver and non-VoiceOver users. Each item is exposed as a single accessible button whose label starts with the media type, such as "photo" or "video", followed by the date and time.
+- **Media Grid Layout:** Media grids preserve each asset's original aspect ratio. Three items appear per row where horizontal size permits, and each row height is determined by the tallest item in that row.
+- **Refresh Behavior:** Library refreshes must keep current media visible until replacement data is ready so users do not experience flicker or a sudden empty state during normal reloads.
+- **Detail Renditions:** Detail views request high-quality original-dimension renditions when feasible, while library grids use appropriately sized thumbnails and avoid eager original media loading.
 
 ### 6.2 VoiceOver Interaction Flow Example
 
@@ -253,6 +257,6 @@ When executing this technical blueprint, code execution blocks must be built in 
 4. **Module 4 (Triage System):** Local quality analytics. Write the objective sorting filters utilizing `VNDetectFaceCaptureQualityRequest` to isolate and drop flawed files.
 5. **Module 5 (Cloud Endpoint):** Remote network management layer. Build a secure REST client using `URLSession` to pass downsampled finalist assets, process structured prompts containing local metadata, and parse returned JSON data fields safely.
 6. **Module 6 (Haptic/Tactile Engineering):** Interactive Spatial Engine. Set up the `DragGesture` coordinate mapping layer, process object detection bounding boxes, and implement spatial audio pan routines and CoreHaptics patterns.
-7. **Module 7 (Interface Assembly):** Dual-mode interface configuration. Assemble the fluid SwiftUI component views, making sure all items natively support visual card-swipes, editing sliders, and screen-reader accessibility layouts.
+7. **Module 7 (Interface Assembly):** Unified accessible interface configuration. Assemble the fluid SwiftUI component views, making sure all items natively support visual card-swipes, editing sliders, and screen-reader accessibility semantics.
 
 This document is now finalized, completely exhaustive, and contains no placeholder titles. You can provide this text directly to your building LLM as context to begin generating the code blocks. Let me know if you want to start expanding on the specific SwiftUI view protocols or database schemas!

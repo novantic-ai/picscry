@@ -66,7 +66,7 @@ final class PhotoLibraryStore: NSObject {
         reloadTask?.cancel()
         isLoading = true
         errorMessage = nil
-        assets = []
+        let shouldPublishIncrementally = assets.isEmpty
 
         let result = fetchLibraryAssets()
         totalAssetCount = result.count
@@ -76,11 +76,21 @@ final class PhotoLibraryStore: NSObject {
         let task = Task { @MainActor in
             let batchSize = 150
             var batch: [PhotoAssetSummary] = []
+            var refreshedAssets: [PhotoAssetSummary] = []
             batch.reserveCapacity(batchSize)
+            refreshedAssets.reserveCapacity(result.count)
+
+            guard result.count > 0 else {
+                assets = []
+                isLoading = false
+                Diagnostics.shared.log("Finished PhotoKit fetch with 0 media summaries.")
+                return
+            }
 
             for index in 0..<result.count {
                 guard !Task.isCancelled else {
-                    Diagnostics.shared.log("PhotoKit fetch cancelled after loading \(assets.count) summaries.")
+                    let loadedCount = shouldPublishIncrementally ? assets.count : refreshedAssets.count
+                    Diagnostics.shared.log("PhotoKit fetch cancelled after loading \(loadedCount) summaries.")
                     return
                 }
 
@@ -88,13 +98,21 @@ final class PhotoLibraryStore: NSObject {
                 batch.append(PhotoAssetSummary(asset: asset))
 
                 if batch.count == batchSize || index == result.count - 1 {
-                    assets.append(contentsOf: batch)
+                    if shouldPublishIncrementally {
+                        assets.append(contentsOf: batch)
+                    } else {
+                        refreshedAssets.append(contentsOf: batch)
+                    }
                     batch.removeAll(keepingCapacity: true)
-                    Diagnostics.shared.log("Loaded \(assets.count) of \(result.count) media summaries.")
+                    let loadedCount = shouldPublishIncrementally ? assets.count : refreshedAssets.count
+                    Diagnostics.shared.log("Loaded \(loadedCount) of \(result.count) media summaries.")
                     await Task.yield()
                 }
             }
 
+            if !shouldPublishIncrementally {
+                assets = refreshedAssets
+            }
             isLoading = false
             Diagnostics.shared.log("Finished PhotoKit fetch with \(assets.count) media summaries.")
         }
@@ -103,11 +121,17 @@ final class PhotoLibraryStore: NSObject {
         await task.value
     }
 
-    func thumbnail(for summary: PhotoAssetSummary, targetSize: CGSize) async -> UIImage? {
+    func thumbnail(
+        for summary: PhotoAssetSummary,
+        targetSize: CGSize,
+        deliveryMode: PHImageRequestOptionsDeliveryMode = .highQualityFormat,
+        contentMode: PHImageContentMode = .aspectFit
+    ) async -> UIImage? {
         guard let asset = Self.asset(with: summary.id) else { return nil }
+        guard !Task.isCancelled else { return nil }
 
         let options = PHImageRequestOptions()
-        options.deliveryMode = .highQualityFormat
+        options.deliveryMode = deliveryMode
         options.resizeMode = .fast
         options.isNetworkAccessAllowed = true
 
@@ -116,11 +140,23 @@ final class PhotoLibraryStore: NSObject {
             imageManager.requestImage(
                 for: asset,
                 targetSize: targetSize,
-                contentMode: .aspectFill,
+                contentMode: contentMode,
                 options: options
             ) { image, info in
+                guard !didResume else { return }
+                if (info?[PHImageCancelledKey] as? Bool) == true {
+                    didResume = true
+                    continuation.resume(returning: nil)
+                    return
+                }
+                if let error = info?[PHImageErrorKey] as? Error {
+                    Diagnostics.shared.log("PhotoKit image request failed: \(error.localizedDescription)")
+                    didResume = true
+                    continuation.resume(returning: nil)
+                    return
+                }
                 let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                guard !didResume, !isDegraded else { return }
+                guard !isDegraded || image != nil else { return }
                 didResume = true
                 continuation.resume(returning: image)
             }
