@@ -34,7 +34,26 @@ struct PhotoAssetSummary: Identifiable {
     }
 
     var displayTitle: String {
-        creationDate?.formatted(date: .abbreviated, time: .shortened) ?? "Undated Photo"
+        creationDate?.formatted(date: .abbreviated, time: .shortened) ?? "Undated \(mediaType.accessibilityName)"
+    }
+
+    var isVideo: Bool {
+        mediaType == .video
+    }
+
+    var durationText: String {
+        guard duration.isFinite, duration > 0 else { return "0:00" }
+
+        let totalSeconds = Int(duration.rounded())
+        let hours = totalSeconds / 3_600
+        let minutes = (totalSeconds % 3_600) / 60
+        let seconds = totalSeconds % 60
+
+        if hours > 0 {
+            return "\(hours):\(String(format: "%02d", minutes)):\(String(format: "%02d", seconds))"
+        }
+
+        return "\(minutes):\(String(format: "%02d", seconds))"
     }
 
     var dimensionsText: String {
@@ -42,10 +61,8 @@ struct PhotoAssetSummary: Identifiable {
     }
 
     var accessibilitySummary: String {
-        let date = creationDate?.formatted(date: .complete, time: .shortened) ?? "unknown date"
-        let favorite = isFavorite ? ", favorite" : ""
-        let locationText = location.map { ", location \($0.coordinate.latitude.formatted(.number.precision(.fractionLength(4)))), \($0.coordinate.longitude.formatted(.number.precision(.fractionLength(4))))" } ?? ""
-        return "\(mediaType.displayName), \(dimensionsText), created \(date)\(favorite)\(locationText)"
+        let date = creationDate?.formatted(date: .complete, time: .shortened) ?? "unknown date and time"
+        return "\(mediaType.accessibilityName), \(date)"
     }
 }
 
@@ -65,12 +82,16 @@ struct PhotoResourceSummary: Identifiable {
 extension PHAssetMediaType {
     var displayName: String {
         switch self {
-        case .image: "Image"
+        case .image: "Photo"
         case .video: "Video"
         case .audio: "Audio"
         case .unknown: "Unknown"
         @unknown default: "Unknown"
         }
+    }
+
+    var accessibilityName: String {
+        displayName.lowercased()
     }
 }
 

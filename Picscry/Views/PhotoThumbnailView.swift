@@ -6,36 +6,38 @@ struct PhotoThumbnailView: View {
     @State private var thumbnail: UIImage?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ZStack {
-                Rectangle()
-                    .fill(Color(.secondarySystemBackground))
+        ZStack(alignment: .bottomTrailing) {
+            Rectangle()
+                .fill(Color(.secondarySystemBackground))
 
-                if let thumbnail {
-                    Image(uiImage: thumbnail)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .clipped()
-                } else {
-                    Image(systemName: "photo")
-                        .font(.title2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .aspectRatio(1, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(asset.displayTitle)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-                Text(asset.dimensionsText)
-                    .font(.caption)
+            if let thumbnail {
+                Image(uiImage: thumbnail)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+            } else {
+                Image(systemName: asset.isVideo ? "video" : "photo")
+                    .font(.title2)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+            }
+
+            if asset.isVideo {
+                Label(asset.durationText, systemImage: "video.fill")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .labelStyle(.titleAndIcon)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 3)
+                    .background(.black.opacity(0.62), in: Capsule())
+                    .padding(5)
+                    .accessibilityHidden(true)
             }
         }
+        .aspectRatio(1, contentMode: .fit)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(asset.accessibilitySummary)
         .task(id: asset.id) {
             thumbnail = await photoLibraryStore.thumbnail(
                 for: asset,
