@@ -215,13 +215,15 @@ jobs:
             )
           '
 
-      - name: Upload and assign build to internal TestFlight group
+      - name: Upload build to internal TestFlight
         run: |
           IPA_PATH=$(find "$RUNNER_TEMP/export" -name "*.ipa" -print -quit)
           fastlane pilot upload \
             --api_key_path "$RUNNER_TEMP/asc_api_key.json" \
             --ipa "$IPA_PATH" \
-            --groups "$TESTFLIGHT_INTERNAL_GROUP" \
             --skip_waiting_for_build_processing false \
+            --submit_beta_review false \
             --distribute_external false \
-            --notify_external_testers false
+            --notify_external_testers false \
+            --uses_non_exempt_encryption false \
+            --changelog "Initial internal development build for photo library and metadata testing."

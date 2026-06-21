@@ -24,6 +24,8 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Picscry needs read access to show your photo library and metadata after you sign in.</string>
 	<key>PHPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
