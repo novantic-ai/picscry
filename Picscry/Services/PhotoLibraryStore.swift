@@ -1,5 +1,6 @@
 import ImageIO
 import Observation
+import AVFoundation
 import Photos
 import SwiftUI
 
@@ -132,7 +133,7 @@ final class PhotoLibraryStore: NSObject {
 
         let options = PHImageRequestOptions()
         options.deliveryMode = deliveryMode
-        options.resizeMode = .fast
+        options.resizeMode = targetSize == PHImageManagerMaximumSize ? .none : .fast
         options.isNetworkAccessAllowed = true
 
         return await withCheckedContinuation { continuation in
@@ -156,9 +157,33 @@ final class PhotoLibraryStore: NSObject {
                     return
                 }
                 let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                guard !isDegraded || image != nil else { return }
+                guard !isDegraded else { return }
                 didResume = true
                 continuation.resume(returning: image)
+            }
+        }
+    }
+
+    func playerItem(for summary: PhotoAssetSummary) async -> AVPlayerItem? {
+        guard summary.isVideo, let asset = Self.asset(with: summary.id) else { return nil }
+
+        let options = PHVideoRequestOptions()
+        options.deliveryMode = .automatic
+        options.isNetworkAccessAllowed = true
+        options.version = .current
+
+        return await withCheckedContinuation { continuation in
+            PHImageManager.default().requestPlayerItem(forVideo: asset, options: options) { playerItem, info in
+                if (info?[PHImageCancelledKey] as? Bool) == true {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                if let error = info?[PHImageErrorKey] as? Error {
+                    Diagnostics.shared.log("PhotoKit video request failed: \(error.localizedDescription)")
+                    continuation.resume(returning: nil)
+                    return
+                }
+                continuation.resume(returning: playerItem)
             }
         }
     }
@@ -206,8 +231,9 @@ final class PhotoLibraryStore: NSObject {
     private func libraryItems(for summary: PhotoAssetSummary) -> [PhotoMetadataItem] {
         var items: [PhotoMetadataItem] = [
             item("Identifier", summary.id),
-            item("Media Type", summary.mediaType.displayName),
+            item("Media Type", summary.mediaKind.displayName),
             item("Dimensions", summary.dimensionsText),
+            item("Orientation", summary.orientationText),
             item("Favorite", summary.isFavorite ? "Yes" : "No"),
             item("Hidden", summary.isHidden ? "Yes" : "No"),
             item("Source", sourceTypeText(summary.sourceType))

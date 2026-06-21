@@ -35,11 +35,21 @@ struct PhotoAssetSummary: Identifiable {
     }
 
     var displayTitle: String {
-        creationDate?.formatted(date: .abbreviated, time: .shortened) ?? "Undated \(mediaType.accessibilityName)"
+        creationDate?.formatted(date: .abbreviated, time: .shortened) ?? "Undated \(mediaKind.accessibilityName)"
     }
 
     var isVideo: Bool {
         mediaType == .video
+    }
+
+    var isScreenshot: Bool {
+        mediaType == .image && mediaSubtypes.contains(.photoScreenshot)
+    }
+
+    var mediaKind: LibraryMediaKind {
+        if isVideo { return .video }
+        if isScreenshot { return .screenshot }
+        return .photo
     }
 
     var durationText: String {
@@ -62,14 +72,19 @@ struct PhotoAssetSummary: Identifiable {
         return CGFloat(pixelWidth) / CGFloat(pixelHeight)
     }
 
+    var orientationText: String {
+        if pixelWidth > pixelHeight { return "landscape" }
+        if pixelHeight > pixelWidth { return "portrait" }
+        return "square"
+    }
+
     var thumbnailTargetSize: CGSize {
         let width: CGFloat = 720
         return CGSize(width: width, height: max(1, width / aspectRatio))
     }
 
     var originalTargetSize: CGSize {
-        guard pixelWidth > 0, pixelHeight > 0 else { return PHImageManagerMaximumSize }
-        return CGSize(width: CGFloat(pixelWidth), height: CGFloat(pixelHeight))
+        PHImageManagerMaximumSize
     }
 
     var dimensionsText: String {
@@ -77,9 +92,30 @@ struct PhotoAssetSummary: Identifiable {
     }
 
     var accessibilitySummary: String {
-        let date = creationDate?.formatted(date: .complete, time: .shortened) ?? "unknown date and time"
-        return "\(mediaType.accessibilityName), \(date)"
+        var parts = [mediaKind.accessibilityName, orientationText]
+        if isFavorite { parts.append("favorite") }
+        if isVideo { parts.append("duration \(durationText)") }
+        parts.append(creationDate?.formatted(date: .complete, time: .shortened) ?? "unknown date and time")
+        return parts.joined(separator: ", ")
     }
+}
+
+enum LibraryMediaKind: String, CaseIterable, Identifiable {
+    case photo
+    case screenshot
+    case video
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .photo: "Photo"
+        case .screenshot: "Screenshot"
+        case .video: "Video"
+        }
+    }
+
+    var accessibilityName: String { displayName.lowercased() }
 }
 
 struct PhotoResourceSummary: Identifiable {
