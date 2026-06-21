@@ -66,17 +66,19 @@ final class PhotoLibraryStore: NSObject {
         reloadTask?.cancel()
         isLoading = true
         errorMessage = nil
-        assets = []
+        let shouldPublishIncrementally = assets.isEmpty
 
-        let result = fetchImageAssets()
+        let result = fetchLibraryAssets()
         totalAssetCount = result.count
-        Diagnostics.shared.log("Starting PhotoKit fetch for \(result.count) image assets.")
+        Diagnostics.shared.log("Starting PhotoKit fetch for \(result.count) photo and video assets.")
         imageManager.stopCachingImagesForAllAssets()
 
         let task = Task { @MainActor in
             let batchSize = 150
             var batch: [PhotoAssetSummary] = []
+            var refreshedAssets: [PhotoAssetSummary] = []
             batch.reserveCapacity(batchSize)
+            refreshedAssets.reserveCapacity(result.count)
 
             for index in 0..<result.count {
                 guard !Task.isCancelled else {
@@ -88,26 +90,39 @@ final class PhotoLibraryStore: NSObject {
                 batch.append(PhotoAssetSummary(asset: asset))
 
                 if batch.count == batchSize || index == result.count - 1 {
-                    assets.append(contentsOf: batch)
+                    if shouldPublishIncrementally {
+                        assets.append(contentsOf: batch)
+                    } else {
+                        refreshedAssets.append(contentsOf: batch)
+                    }
                     batch.removeAll(keepingCapacity: true)
-                    Diagnostics.shared.log("Loaded \(assets.count) of \(result.count) photo summaries.")
+                    let loadedCount = shouldPublishIncrementally ? assets.count : refreshedAssets.count
+                    Diagnostics.shared.log("Loaded \(loadedCount) of \(result.count) media summaries.")
                     await Task.yield()
                 }
             }
 
+            if !shouldPublishIncrementally {
+                assets = refreshedAssets
+            }
             isLoading = false
-            Diagnostics.shared.log("Finished PhotoKit fetch with \(assets.count) photo summaries.")
+            Diagnostics.shared.log("Finished PhotoKit fetch with \(assets.count) media summaries.")
         }
 
         reloadTask = task
         await task.value
     }
 
-    func thumbnail(for summary: PhotoAssetSummary, targetSize: CGSize) async -> UIImage? {
+    func thumbnail(
+        for summary: PhotoAssetSummary,
+        targetSize: CGSize,
+        deliveryMode: PHImageRequestOptionsDeliveryMode = .highQualityFormat,
+        contentMode: PHImageContentMode = .aspectFit
+    ) async -> UIImage? {
         guard let asset = Self.asset(with: summary.id) else { return nil }
 
         let options = PHImageRequestOptions()
-        options.deliveryMode = .highQualityFormat
+        options.deliveryMode = deliveryMode
         options.resizeMode = .fast
         options.isNetworkAccessAllowed = true
 
@@ -116,11 +131,16 @@ final class PhotoLibraryStore: NSObject {
             imageManager.requestImage(
                 for: asset,
                 targetSize: targetSize,
-                contentMode: .aspectFill,
+                contentMode: contentMode,
                 options: options
             ) { image, info in
-                let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                guard !didResume, !isDegraded else { return }
+                guard !didResume else { return }
+                if (info?[PHImageCancelledKey] as? Bool) == true {
+                    didResume = true
+                    continuation.resume(returning: nil)
+                    return
+                }
+                guard let image else { return }
                 didResume = true
                 continuation.resume(returning: image)
             }
@@ -143,7 +163,7 @@ final class PhotoLibraryStore: NSObject {
             )
         ]
 
-        if let imageProperties = await imageProperties(for: asset), !imageProperties.isEmpty {
+        if asset.mediaType == .image, let imageProperties = await imageProperties(for: asset), !imageProperties.isEmpty {
             sections.append(
                 PhotoMetadataSection(
                     id: "image-properties",
@@ -156,10 +176,15 @@ final class PhotoLibraryStore: NSObject {
         return PhotoMetadata(sections: sections.filter { !$0.items.isEmpty })
     }
 
-    private func fetchImageAssets() -> PHFetchResult<PHAsset> {
+    private func fetchLibraryAssets() -> PHFetchResult<PHAsset> {
         let options = PHFetchOptions()
+        options.predicate = NSPredicate(
+            format: "mediaType == %d || mediaType == %d",
+            PHAssetMediaType.image.rawValue,
+            PHAssetMediaType.video.rawValue
+        )
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        return PHAsset.fetchAssets(with: .image, options: options)
+        return PHAsset.fetchAssets(with: options)
     }
 
     private func libraryItems(for summary: PhotoAssetSummary) -> [PhotoMetadataItem] {
@@ -280,6 +305,9 @@ final class PhotoLibraryStore: NSObject {
         if subtypes.contains(.photoScreenshot) { values.append("Screenshot") }
         if subtypes.contains(.photoLive) { values.append("Live Photo") }
         if subtypes.contains(.photoDepthEffect) { values.append("Depth Effect") }
+        if subtypes.contains(.videoHighFrameRate) { values.append("High Frame Rate") }
+        if subtypes.contains(.videoTimelapse) { values.append("Timelapse") }
+        if subtypes.contains(.videoCinematic) { values.append("Cinematic") }
         return values.isEmpty ? "None" : values.joined(separator: ", ")
     }
 

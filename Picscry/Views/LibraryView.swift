@@ -4,13 +4,13 @@ import SwiftUI
 struct LibraryView: View {
     @Environment(AuthenticationStore.self) private var authenticationStore
     @Environment(PhotoLibraryStore.self) private var photoLibraryStore
-    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @State private var selectedAsset: PhotoAssetSummary?
     @State private var isShowingDiagnostics = false
 
-    private let columns = [
-        GridItem(.adaptive(minimum: 156, maximum: 220), spacing: 14)
-    ]
+    private let columns = Array(
+        repeating: GridItem(.flexible(minimum: 0), spacing: 2),
+        count: 3
+    )
 
     var body: some View {
         NavigationStack {
@@ -64,11 +64,9 @@ struct LibraryView: View {
             } else if photoLibraryStore.assets.isEmpty {
                 EmptyStateView(
                     systemImage: "photo.stack",
-                    title: "No Photos Found",
-                    message: "Picscry will show your imported photo library here once photos are available."
+                    title: "No Photos or Videos Found",
+                    message: "Picscry will show your imported photo and video library here once media is available."
                 )
-            } else if voiceOverEnabled {
-                accessibleList
             } else {
                 visualGrid
             }
@@ -77,7 +75,7 @@ struct LibraryView: View {
 
     private var visualGrid: some View {
         ScrollView {
-            LazyVGrid(columns: columns, spacing: 14) {
+            LazyVGrid(columns: columns, spacing: 2) {
                 ForEach(photoLibraryStore.assets) { asset in
                     Button {
                         selectedAsset = asset
@@ -86,10 +84,11 @@ struct LibraryView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(asset.accessibilitySummary)
-                    .accessibilityHint("Opens all available metadata for this photo")
+                    .accessibilityHint("Opens all available metadata for this media item")
                 }
             }
-            .padding(16)
+            .padding(.horizontal, 2)
+            .padding(.vertical, 2)
         }
         .overlay(alignment: .bottom) {
             if photoLibraryStore.authorizationState == .limited {
@@ -106,7 +105,7 @@ struct LibraryView: View {
     private var loadingView: some View {
         VStack(spacing: 12) {
             ProgressView()
-            Text("Loading Photos")
+            Text("Loading Library")
                 .font(.headline)
             if photoLibraryStore.totalAssetCount > 0 {
                 Text("\(photoLibraryStore.assets.count) of \(photoLibraryStore.totalAssetCount)")
@@ -117,23 +116,6 @@ struct LibraryView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var accessibleList: some View {
-        List(photoLibraryStore.assets) { asset in
-            Button {
-                selectedAsset = asset
-            } label: {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(asset.displayTitle)
-                        .font(.headline)
-                    Text(asset.accessibilitySummary)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.vertical, 4)
-            }
-            .accessibilityHint("Opens all available metadata for this photo")
-        }
-    }
 }
 
 #Preview {

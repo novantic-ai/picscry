@@ -205,12 +205,15 @@ To maintain high performance and stay within operating system battery optimizati
 
 ## 6. Multi-Modal Accessibility UI/UX Design
 
-The interface adapts dynamically based on whether system screen reading tools are currently running.
+The interface follows a unified inclusive design model: VoiceOver, Dynamic Type, reduced motion, contrast, and other accessibility settings may change semantics, labels, focus order, hit targets, and interaction affordances, but they must not silently switch the user into a materially different layout for the same workflow. This prevents regressions where screen-reader users and non-screen-reader users see different home-screen structures or stale UI behavior.
 
 ### 6.1 Unified User Interface Specification Matrix
 
-- **Visual Mode Layout (Sighted Focus):** Combines clean grid layouts with swipeable card queues. Images recommended for cleanups appear in stacked groupings. Swiping left flags the junk batch for deletion, while swiping right locks in the choice. A collapsible bottom drawer displays image stats, semantic keywords, social captions, and non-destructive image adjustments.
-- **Non-Visual Mode Layout (VoiceOver Focus):** Switches to an expanded list view container structure. The layout prioritizes simple, clean vertical accessibility traits over complex visual grids.
+- **Single Source Layout:** Core screens use one shared SwiftUI layout for all users. The Library home screen is a media grid for both VoiceOver and non-VoiceOver users, with each item exposed as a single accessible button whose label starts with the media type followed by date and time.
+- **Visual Presentation:** Media grids maintain asset aspect ratios. Three items appear per row where horizontal size class permits; row height is determined by the tallest item in that row so photos and videos are visible without cropping.
+- **Accessibility Adaptation:** Accessibility-specific work should enhance the shared UI with labels, hints, traits, focus order, larger hit areas, captions, haptics, and alternate actions. Do not create a separate VoiceOver-only list or alternate screen unless a future design explicitly documents why the shared layout cannot meet WCAG and Apple Human Interface Guidelines requirements.
+- **Refresh Behavior:** Library refreshes must avoid clearing visible media before replacement data is ready. Keep the current grid visible during reloads, then publish refreshed summaries in a stable update to prevent flicker and repeated layout resets.
+- **Media Quality:** Detail views request high-quality, original-dimension renditions for the selected asset when feasible. Grid thumbnails request high-quality renditions sized for their visible display area and preserve the original aspect ratio.
 
 ### 6.2 VoiceOver Interaction Flow Example
 
@@ -253,6 +256,6 @@ When executing this technical blueprint, code execution blocks must be built in 
 4. **Module 4 (Triage System):** Local quality analytics. Write the objective sorting filters utilizing `VNDetectFaceCaptureQualityRequest` to isolate and drop flawed files.
 5. **Module 5 (Cloud Endpoint):** Remote network management layer. Build a secure REST client using `URLSession` to pass downsampled finalist assets, process structured prompts containing local metadata, and parse returned JSON data fields safely.
 6. **Module 6 (Haptic/Tactile Engineering):** Interactive Spatial Engine. Set up the `DragGesture` coordinate mapping layer, process object detection bounding boxes, and implement spatial audio pan routines and CoreHaptics patterns.
-7. **Module 7 (Interface Assembly):** Dual-mode interface configuration. Assemble the fluid SwiftUI component views, making sure all items natively support visual card-swipes, editing sliders, and screen-reader accessibility layouts.
+7. **Module 7 (Interface Assembly):** Unified accessible interface configuration. Assemble fluid SwiftUI component views from one shared layout per workflow, making sure all items natively support visual gestures, editing controls, and screen-reader semantics without splitting VoiceOver and non-VoiceOver users into divergent UIs.
 
 This document is now finalized, completely exhaustive, and contains no placeholder titles. You can provide this text directly to your building LLM as context to begin generating the code blocks. Let me know if you want to start expanding on the specific SwiftUI view protocols or database schemas!
