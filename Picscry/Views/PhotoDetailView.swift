@@ -7,20 +7,13 @@ struct PhotoDetailView: View {
     let initialAsset: PhotoAssetSummary
 
     @Environment(PhotoLibraryStore.self) private var photoLibraryStore
-    @State private var visibleRange: Range<Int>
     @State private var selectedAssetID: PhotoAssetSummary.ID
     @State private var isShowingMetadata = false
     @Environment(\.dismiss) private var dismiss
 
-    private var pageAssets: [PhotoAssetSummary] {
-        Array(assets[visibleRange])
-    }
-
     init(assets: [PhotoAssetSummary], initialAsset: PhotoAssetSummary) {
         self.assets = assets
         self.initialAsset = initialAsset
-        let initialIndex = assets.firstIndex { $0.id == initialAsset.id }
-        _visibleRange = State(initialValue: Self.pageRange(centeredOn: initialIndex, assetCount: assets.count))
         _selectedAssetID = State(initialValue: initialAsset.id)
     }
 
@@ -28,24 +21,26 @@ struct PhotoDetailView: View {
         NavigationStack {
             GeometryReader { geometry in
                 TabView(selection: $selectedAssetID) {
-                    ForEach(pageAssets) { asset in
+                    ForEach(assets) { asset in
                         MediaDetailPage(
                             asset: asset,
                             isActive: asset.id == selectedAssetID,
                             isShowingMetadata: $isShowingMetadata
                         )
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .clipped()
                         .tag(asset.id)
                     }
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
                 .onAppear {
-                    updateVisibleRangeAndCache(for: selectedAssetID, viewportSize: geometry.size)
+                    updateCache(for: selectedAssetID, viewportSize: geometry.size)
                 }
                 .onChange(of: selectedAssetID) { _, newValue in
-                    updateVisibleRangeAndCache(for: newValue, viewportSize: geometry.size)
+                    updateCache(for: newValue, viewportSize: geometry.size)
                 }
                 .onChange(of: geometry.size) { _, newSize in
-                    cacheVisibleAssets(viewportSize: newSize)
+                    updateCache(for: selectedAssetID, viewportSize: newSize)
                 }
             }
             .navigationTitle(currentAsset?.mediaKind.displayName ?? "Media")
@@ -68,15 +63,10 @@ struct PhotoDetailView: View {
         assets.first { $0.id == selectedAssetID } ?? initialAsset
     }
 
-    private func updateVisibleRangeAndCache(for assetID: PhotoAssetSummary.ID, viewportSize: CGSize) {
+    private func updateCache(for assetID: PhotoAssetSummary.ID, viewportSize: CGSize) {
         guard let selectedIndex = assets.firstIndex(where: { $0.id == assetID }) else { return }
-        let nextRange = Self.pageRange(centeredOn: selectedIndex, assetCount: assets.count)
-        visibleRange = nextRange
-        cacheAssets(in: nextRange, viewportSize: viewportSize)
-    }
-
-    private func cacheVisibleAssets(viewportSize: CGSize) {
-        cacheAssets(in: visibleRange, viewportSize: viewportSize)
+        let cacheRange = PhotoDetailPaging.preloadRange(centeredOn: selectedIndex, assetCount: assets.count)
+        cacheAssets(in: cacheRange, viewportSize: viewportSize)
     }
 
     private func cacheAssets(in range: Range<Int>, viewportSize: CGSize) {
@@ -86,22 +76,23 @@ struct PhotoDetailView: View {
         )
     }
 
-    private static func pageRange(centeredOn initialIndex: Int?, assetCount: Int) -> Range<Int> {
-        guard assetCount > 0 else { return 0..<0 }
-        guard let initialIndex else { return 0..<min(assetCount, 1) }
-
-        let pageRadius = 12
-        let lowerBound = max(0, initialIndex - pageRadius)
-        let upperBound = min(assetCount, initialIndex + pageRadius + 1)
-        return lowerBound..<upperBound
-    }
-
     private static func pixelTargetSize(for viewportSize: CGSize) -> CGSize {
         let scale = UIScreen.main.scale
         return CGSize(
             width: viewportSize.width * scale,
             height: viewportSize.height * scale
         )
+    }
+}
+
+enum PhotoDetailPaging {
+    static func preloadRange(centeredOn index: Int?, assetCount: Int, radius: Int = 12) -> Range<Int> {
+        guard assetCount > 0 else { return 0..<0 }
+        guard let index else { return 0..<min(assetCount, 1) }
+
+        let lowerBound = max(0, index - radius)
+        let upperBound = min(assetCount, index + radius + 1)
+        return lowerBound..<upperBound
     }
 }
 
@@ -285,6 +276,8 @@ private struct ZoomableImageView: UIViewRepresentable {
         scrollView.addSubview(imageView)
         context.coordinator.imageView = imageView
         context.coordinator.imageIdentifier = ObjectIdentifier(image)
+        updateZoomScales(for: scrollView, image: image)
+        updatePanGestureAvailability(for: scrollView)
         return scrollView
     }
 
@@ -299,9 +292,11 @@ private struct ZoomableImageView: UIViewRepresentable {
         applyDynamicRange(to: imageView)
         imageView.frame = scrollView.bounds
         updateZoomScales(for: scrollView, image: image)
+        updatePanGestureAvailability(for: scrollView)
 
         if didChangeImage {
             scrollView.setZoomScale(1, animated: false)
+            updatePanGestureAvailability(for: scrollView)
             context.coordinator.imageIdentifier = nextIdentifier
             logImageDiagnostics(for: image, context: "updateUIView")
         }
@@ -351,6 +346,11 @@ private struct ZoomableImageView: UIViewRepresentable {
         return max(4, widthScale, heightScale)
     }
 
+    private func updatePanGestureAvailability(for scrollView: UIScrollView) {
+        let isZoomed = scrollView.zoomScale > scrollView.minimumZoomScale + 0.01
+        scrollView.panGestureRecognizer.isEnabled = isZoomed
+    }
+
     private static func pixelSizeText(for image: UIImage) -> String {
         let width = Int((image.size.width * image.scale).rounded())
         let height = Int((image.size.height * image.scale).rounded())
@@ -363,6 +363,11 @@ private struct ZoomableImageView: UIViewRepresentable {
 
         func viewForZooming(in scrollView: UIScrollView) -> UIView? {
             imageView
+        }
+
+        func scrollViewDidZoom(_ scrollView: UIScrollView) {
+            let isZoomed = scrollView.zoomScale > scrollView.minimumZoomScale + 0.01
+            scrollView.panGestureRecognizer.isEnabled = isZoomed
         }
     }
 }

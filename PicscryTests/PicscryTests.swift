@@ -90,4 +90,20 @@ final class PicscryTests: XCTestCase {
 
         XCTAssertEqual(quality, .fullResolutionRendered)
     }
+
+    func testPhotoDetailPreloadRangeCentersAroundSelectedAsset() {
+        XCTAssertEqual(PhotoDetailPaging.preloadRange(centeredOn: 50, assetCount: 100, radius: 12), 38..<63)
+    }
+
+    func testPhotoDetailPreloadRangeClampsAtStart() {
+        XCTAssertEqual(PhotoDetailPaging.preloadRange(centeredOn: 2, assetCount: 100, radius: 12), 0..<15)
+    }
+
+    func testPhotoDetailPreloadRangeClampsAtEnd() {
+        XCTAssertEqual(PhotoDetailPaging.preloadRange(centeredOn: 98, assetCount: 100, radius: 12), 86..<100)
+    }
+
+    func testPhotoDetailPreloadRangeHandlesEmptyLibrary() {
+        XCTAssertEqual(PhotoDetailPaging.preloadRange(centeredOn: nil, assetCount: 0, radius: 12), 0..<0)
+    }
 }

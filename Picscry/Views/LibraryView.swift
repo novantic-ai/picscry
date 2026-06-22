@@ -49,7 +49,7 @@ struct LibraryView: View {
                         }
                     }
                 }
-                .sheet(item: $selectedAsset) { asset in
+                .fullScreenCover(item: $selectedAsset) { asset in
                     PhotoDetailView(assets: filteredAssets, initialAsset: asset)
                 }
                 .sheet(isPresented: $isShowingDiagnostics) {
