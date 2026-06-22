@@ -10,7 +10,6 @@ struct PhotoDetailView: View {
     @State private var visibleRange: Range<Int>
     @State private var selectedAssetID: PhotoAssetSummary.ID
     @State private var isShowingMetadata = false
-    @State private var renderMode: PhotoRenderMode = .preferHDR
     @Environment(\.dismiss) private var dismiss
 
     private var pageAssets: [PhotoAssetSummary] {
@@ -33,8 +32,7 @@ struct PhotoDetailView: View {
                         MediaDetailPage(
                             asset: asset,
                             isActive: asset.id == selectedAssetID,
-                            isShowingMetadata: $isShowingMetadata,
-                            renderMode: renderMode
+                            isShowingMetadata: $isShowingMetadata
                         )
                         .tag(asset.id)
                     }
@@ -61,12 +59,6 @@ struct PhotoDetailView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu("Render") {
-                        Button("Prefer HDR") { renderMode = .preferHDR }
-                        Button("Compatibility SDR") { renderMode = .compatibilitySDR }
-                    }
                 }
             }
         }
@@ -119,7 +111,6 @@ private struct MediaDetailPage: View {
     let asset: PhotoAssetSummary
     let isActive: Bool
     @Binding var isShowingMetadata: Bool
-    let renderMode: PhotoRenderMode
 
     @State private var image: UIImage?
     @State private var loadedImageQuality: LoadedImageQuality?
@@ -156,14 +147,11 @@ private struct MediaDetailPage: View {
                 }
                 await loadMedia(displaySize: CGSize(width: geometry.size.width, height: mediaHeight(in: geometry.size)))
             }
-            .task(id: "\(isShowingMetadata)-\(renderMode.diagnosticName)") {
+            .task(id: isShowingMetadata) {
                 guard isActive, isShowingMetadata else { return }
                 isLoadingMetadata = true
-                metadata = await photoLibraryStore.metadata(for: asset, renderMode: renderMode)
+                metadata = await photoLibraryStore.metadata(for: asset)
                 isLoadingMetadata = false
-            }
-            .onChange(of: renderMode) { _, _ in
-                metadata = .empty
             }
             .onDisappear { player?.pause() }
         }
@@ -186,7 +174,7 @@ private struct MediaDetailPage: View {
                         .foregroundStyle(.secondary)
                 }
             } else if let image {
-                ZoomableImageView(image: image, accessibilityLabel: asset.accessibilitySummary, renderMode: renderMode)
+                ZoomableImageView(image: image, accessibilityLabel: asset.accessibilitySummary)
                     .frame(width: availableSize.width, height: availableSize.height)
 
                 if loadedImageQuality == .preview && isLoadingMedia {
@@ -269,7 +257,6 @@ private struct MediaDetailPage: View {
 private struct ZoomableImageView: UIViewRepresentable {
     let image: UIImage
     let accessibilityLabel: String
-    let renderMode: PhotoRenderMode
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -325,12 +312,7 @@ private struct ZoomableImageView: UIViewRepresentable {
         // request full-resolution data, wide color, and HDR display, but exact Photos.app
         // appearance may not be 100% reproducible.
         if #available(iOS 17.0, *) {
-            switch renderMode {
-            case .preferHDR:
-                imageView.preferredImageDynamicRange = .high
-            case .compatibilitySDR:
-                imageView.preferredImageDynamicRange = .standard
-            }
+            imageView.preferredImageDynamicRange = .high
         }
     }
 
@@ -339,7 +321,7 @@ private struct ZoomableImageView: UIViewRepresentable {
         let colorSpaceName = cgImage?.colorSpace?.name.map { "\($0)" } ?? "unknown"
         let displayGamut = UIScreen.main.traitCollection.displayGamut.diagnosticName
         let imageAssetStatus = image.imageAsset == nil ? "none" : "present"
-        Diagnostics.shared.log("Detail UIImageView \(context): renderMode \(renderMode.diagnosticName), UIImage scale \(image.scale), pixels \(Self.pixelSizeText(for: image)), imageAsset \(imageAssetStatus), CGImage bitsPerComponent \(cgImage?.bitsPerComponent.description ?? "unknown"), bitsPerPixel \(cgImage?.bitsPerPixel.description ?? "unknown"), colorSpace \(colorSpaceName), displayGamut \(displayGamut), HDRDynamicRangeRequested \(renderMode == .preferHDR).")
+        Diagnostics.shared.log("Detail UIImageView \(context): renderMode \(PhotoRenderMode.preferHDR.diagnosticName), UIImage scale \(image.scale), pixels \(Self.pixelSizeText(for: image)), imageAsset \(imageAssetStatus), CGImage bitsPerComponent \(cgImage?.bitsPerComponent.description ?? "unknown"), bitsPerPixel \(cgImage?.bitsPerPixel.description ?? "unknown"), colorSpace \(colorSpaceName), displayGamut \(displayGamut), HDRDynamicRangeRequested true.")
     }
 
     private func updateZoomScales(for scrollView: UIScrollView, image: UIImage) {
