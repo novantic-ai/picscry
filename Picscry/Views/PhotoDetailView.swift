@@ -10,6 +10,7 @@ struct PhotoDetailView: View {
     @State private var visibleRange: Range<Int>
     @State private var selectedAssetID: PhotoAssetSummary.ID
     @State private var isShowingMetadata = false
+    @State private var renderMode: PhotoRenderMode = .preferHDR
     @Environment(\.dismiss) private var dismiss
 
     private var pageAssets: [PhotoAssetSummary] {
@@ -32,7 +33,8 @@ struct PhotoDetailView: View {
                         MediaDetailPage(
                             asset: asset,
                             isActive: asset.id == selectedAssetID,
-                            isShowingMetadata: $isShowingMetadata
+                            isShowingMetadata: $isShowingMetadata,
+                            renderMode: renderMode
                         )
                         .tag(asset.id)
                     }
@@ -59,6 +61,12 @@ struct PhotoDetailView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu("Render") {
+                        Button("Prefer HDR") { renderMode = .preferHDR }
+                        Button("Compatibility SDR") { renderMode = .compatibilitySDR }
+                    }
                 }
             }
         }
@@ -111,6 +119,7 @@ private struct MediaDetailPage: View {
     let asset: PhotoAssetSummary
     let isActive: Bool
     @Binding var isShowingMetadata: Bool
+    let renderMode: PhotoRenderMode
 
     @State private var image: UIImage?
     @State private var loadedImageQuality: LoadedImageQuality?
@@ -138,7 +147,7 @@ private struct MediaDetailPage: View {
                 }
             }
             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .center)
-            .background(Color(.systemBackground))
+            .background(Color.black)
             .animation(.easeInOut(duration: 0.2), value: isShowingMetadata)
             .task(id: isActive) {
                 guard isActive else {
@@ -147,11 +156,14 @@ private struct MediaDetailPage: View {
                 }
                 await loadMedia(displaySize: CGSize(width: geometry.size.width, height: mediaHeight(in: geometry.size)))
             }
-            .task(id: isShowingMetadata) {
-                guard isActive, isShowingMetadata, metadata.sections.isEmpty else { return }
+            .task(id: "\(isShowingMetadata)-\(renderMode.diagnosticName)") {
+                guard isActive, isShowingMetadata else { return }
                 isLoadingMetadata = true
-                metadata = await photoLibraryStore.metadata(for: asset)
+                metadata = await photoLibraryStore.metadata(for: asset, renderMode: renderMode)
                 isLoadingMetadata = false
+            }
+            .onChange(of: renderMode) { _, _ in
+                metadata = .empty
             }
             .onDisappear { player?.pause() }
         }
@@ -160,7 +172,7 @@ private struct MediaDetailPage: View {
     @ViewBuilder
     private func mediaView(availableSize: CGSize) -> some View {
         ZStack(alignment: .center) {
-            Rectangle().fill(Color(.secondarySystemBackground))
+            Color.black
 
             if asset.isVideo {
                 if let player {
@@ -174,7 +186,7 @@ private struct MediaDetailPage: View {
                         .foregroundStyle(.secondary)
                 }
             } else if let image {
-                ZoomableImageView(image: image, accessibilityLabel: asset.accessibilitySummary)
+                ZoomableImageView(image: image, accessibilityLabel: asset.accessibilitySummary, renderMode: renderMode)
                     .frame(width: availableSize.width, height: availableSize.height)
 
                 if loadedImageQuality == .preview && isLoadingMedia {
@@ -257,6 +269,7 @@ private struct MediaDetailPage: View {
 private struct ZoomableImageView: UIViewRepresentable {
     let image: UIImage
     let accessibilityLabel: String
+    let renderMode: PhotoRenderMode
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -279,6 +292,8 @@ private struct ZoomableImageView: UIViewRepresentable {
         imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         imageView.isAccessibilityElement = true
         imageView.accessibilityLabel = accessibilityLabel
+        applyDynamicRange(to: imageView)
+        logImageDiagnostics(for: image, context: "makeUIView")
 
         scrollView.addSubview(imageView)
         context.coordinator.imageView = imageView
@@ -294,13 +309,37 @@ private struct ZoomableImageView: UIViewRepresentable {
         imageView.image = image
         imageView.accessibilityLabel = accessibilityLabel
         scrollView.accessibilityLabel = accessibilityLabel
+        applyDynamicRange(to: imageView)
         imageView.frame = scrollView.bounds
         updateZoomScales(for: scrollView, image: image)
 
         if didChangeImage {
             scrollView.setZoomScale(1, animated: false)
             context.coordinator.imageIdentifier = nextIdentifier
+            logImageDiagnostics(for: image, context: "updateUIView")
         }
+    }
+
+    private func applyDynamicRange(to imageView: UIImageView) {
+        // Native Photos may use private Apple rendering and tone-mapping behavior. Picscry can
+        // request full-resolution data, wide color, and HDR display, but exact Photos.app
+        // appearance may not be 100% reproducible.
+        if #available(iOS 17.0, *) {
+            switch renderMode {
+            case .preferHDR:
+                imageView.preferredImageDynamicRange = .high
+            case .compatibilitySDR:
+                imageView.preferredImageDynamicRange = .standard
+            }
+        }
+    }
+
+    private func logImageDiagnostics(for image: UIImage, context: String) {
+        let cgImage = image.cgImage
+        let colorSpaceName = cgImage?.colorSpace?.name.map { "\($0)" } ?? "unknown"
+        let displayGamut = UIScreen.main.traitCollection.displayGamut.diagnosticName
+        let imageAssetStatus = image.imageAsset == nil ? "none" : "present"
+        Diagnostics.shared.log("Detail UIImageView \(context): renderMode \(renderMode.diagnosticName), UIImage scale \(image.scale), pixels \(Self.pixelSizeText(for: image)), imageAsset \(imageAssetStatus), CGImage bitsPerComponent \(cgImage?.bitsPerComponent.description ?? "unknown"), bitsPerPixel \(cgImage?.bitsPerPixel.description ?? "unknown"), colorSpace \(colorSpaceName), displayGamut \(displayGamut), HDRDynamicRangeRequested \(renderMode == .preferHDR).")
     }
 
     private func updateZoomScales(for scrollView: UIScrollView, image: UIImage) {
@@ -330,12 +369,29 @@ private struct ZoomableImageView: UIViewRepresentable {
         return max(4, widthScale, heightScale)
     }
 
+    private static func pixelSizeText(for image: UIImage) -> String {
+        let width = Int((image.size.width * image.scale).rounded())
+        let height = Int((image.size.height * image.scale).rounded())
+        return "\(width)x\(height)"
+    }
+
     final class Coordinator: NSObject, UIScrollViewDelegate {
         weak var imageView: UIImageView?
         var imageIdentifier: ObjectIdentifier?
 
         func viewForZooming(in scrollView: UIScrollView) -> UIView? {
             imageView
+        }
+    }
+}
+
+private extension UIDisplayGamut {
+    var diagnosticName: String {
+        switch self {
+        case .SRGB: "sRGB"
+        case .P3: "P3"
+        case .unspecified: "unspecified"
+        @unknown default: "unknown"
         }
     }
 }

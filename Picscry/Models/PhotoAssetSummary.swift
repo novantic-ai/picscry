@@ -16,6 +16,18 @@ enum LoadedImageQuality {
     case fullResolutionRendered
 }
 
+enum PhotoRenderMode {
+    case compatibilitySDR
+    case preferHDR
+
+    var diagnosticName: String {
+        switch self {
+        case .compatibilitySDR: "compatibilitySDR"
+        case .preferHDR: "preferHDR"
+        }
+    }
+}
+
 struct PhotoDisplayImageUpdate {
     let image: UIImage
     let quality: LoadedImageQuality

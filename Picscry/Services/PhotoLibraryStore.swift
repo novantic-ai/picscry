@@ -197,6 +197,7 @@ final class PhotoLibraryStore: NSObject {
     func displayThenFullQualityImageUpdates(for summary: PhotoAssetSummary, displayTargetSize: CGSize) -> AsyncStream<PhotoDisplayImageUpdate> {
         AsyncStream { continuation in
             let task = Task { @MainActor in
+                // Preview rendering is capped for speed while paging through detail photos.
                 if let displayImage = await thumbnail(
                     for: summary,
                     targetSize: Self.normalizedTargetSize(displayTargetSize),
@@ -212,6 +213,8 @@ final class PhotoLibraryStore: NSObject {
                     return
                 }
 
+                // Final rendered image requests must stay uncapped so normal HEIC/JPEG photos
+                // can match the PHAsset pixel dimensions when PhotoKit provides full size.
                 if let renderedImage = await originalRenderedImage(for: summary) {
                     guard !Task.isCancelled else { return }
                     Diagnostics.shared.log("Loaded full-resolution rendered image for \(summary.id): asset \(summary.pixelWidth)x\(summary.pixelHeight), UIImage \(Self.pixelSizeText(for: renderedImage)).")
@@ -228,7 +231,8 @@ final class PhotoLibraryStore: NSObject {
     }
 
     // Full-resolution rendered UIImage for display. This is not the original file bytes.
-    // Use originalPhotoData(for:) when exporting, sharing, or inspecting the original asset resource.
+    // Use originalPhotoData(for:) when exporting, sharing, or inspecting the exact asset
+    // resource bytes without recompression.
     func fullResolutionRenderedImageUpdates(for summary: PhotoAssetSummary) -> AsyncStream<PhotoDisplayImageUpdate> {
         fullResolutionRenderedImageUpdates(for: summary, includeDegradedResults: true)
     }
@@ -269,6 +273,12 @@ final class PhotoLibraryStore: NSObject {
 
         let orientation = Self.imageOrientation(in: data)
         Diagnostics.shared.log("Fetched original asset data for \(summary.id): \(data.count) bytes, type \(selectedResource.type.displayName), filename \(selectedResource.originalFilename), UTI \(selectedResource.uniformTypeIdentifier), orientation \(orientation?.rawValue.description ?? "unknown").")
+        Self.logImageIOMetadata(
+            in: data,
+            context: "original asset data",
+            summary: summary,
+            uniformTypeIdentifier: selectedResource.uniformTypeIdentifier
+        )
 
         return OriginalPhotoData(
             data: data,
@@ -301,11 +311,21 @@ final class PhotoLibraryStore: NSObject {
                     continuation.resume(returning: nil)
                     return
                 }
-                guard let data, let image = UIImage(data: data) else {
+                guard let data else {
                     continuation.resume(returning: nil)
                     return
                 }
-                continuation.resume(returning: Self.image(image, applying: orientation))
+                Self.logImageIOMetadata(
+                    in: data,
+                    context: "PhotoKit rendered image data",
+                    summary: summary,
+                    uniformTypeIdentifier: nil
+                )
+                guard let image = Self.decodeDisplayImage(data: data, orientation: orientation, summary: summary) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                continuation.resume(returning: image)
             }
         }
 
@@ -453,7 +473,7 @@ final class PhotoLibraryStore: NSObject {
         }
     }
 
-    func metadata(for summary: PhotoAssetSummary) async -> PhotoMetadata {
+    func metadata(for summary: PhotoAssetSummary, renderMode: PhotoRenderMode = .preferHDR) async -> PhotoMetadata {
         guard let asset = Self.asset(with: summary.id) else { return .empty }
         let resourceSummaries = PHAssetResource.assetResources(for: asset).map(PhotoResourceSummary.init(resource:))
 
@@ -491,6 +511,32 @@ final class PhotoLibraryStore: NSObject {
                     id: "image-properties",
                     title: "Image Metadata",
                     items: flatten(metadata: imageProperties)
+                )
+            )
+        }
+
+        if asset.mediaType == .image {
+            let renderingItems = await renderingDiagnosticItems(
+                for: summary,
+                asset: asset,
+                resourceSummaries: resourceSummaries,
+                renderMode: renderMode
+            )
+            sections.append(
+                PhotoMetadataSection(
+                    id: "rendering-diagnostics",
+                    title: "Rendering Diagnostics",
+                    items: renderingItems
+                )
+            )
+        } else {
+            sections.append(
+                PhotoMetadataSection(
+                    id: "video-rendering-diagnostics",
+                    title: "Rendering Diagnostics",
+                    items: [
+                        item("Video HDR/EDR Follow-up", "Investigate AVPlayerLayer HDR/EDR behavior, original/current video asset quality, and AVAsset track color primaries, transfer function, and HDR format.")
+                    ]
                 )
             )
         }
@@ -550,6 +596,45 @@ final class PhotoLibraryStore: NSObject {
                 item("Uniform Type", resource.uniformTypeIdentifier)
             ]
         }
+    }
+
+    private func renderingDiagnosticItems(
+        for summary: PhotoAssetSummary,
+        asset: PHAsset,
+        resourceSummaries: [PhotoResourceSummary],
+        renderMode: PhotoRenderMode
+    ) async -> [PhotoMetadataItem] {
+        var items: [PhotoMetadataItem] = [
+            item("Asset Pixel Dimensions", "\(asset.pixelWidth) x \(asset.pixelHeight)"),
+            item("Render Mode", renderMode.diagnosticName),
+            item("Display Gamut", UIScreen.main.traitCollection.displayGamut.diagnosticName),
+            item("iOS Version", UIDevice.current.systemVersion),
+            item("HDR Dynamic Range Requested", renderMode == .preferHDR ? "Yes on iOS 17+" : "No; standard dynamic range requested on iOS 17+")
+        ]
+
+        let previewTargetSize = Self.normalizedTargetSize(CGSize(width: asset.pixelWidth, height: asset.pixelHeight))
+        if let previewImage = await thumbnail(for: summary, targetSize: previewTargetSize, deliveryMode: .highQualityFormat, contentMode: .aspectFit) {
+            items.append(item("Preview UIImage Pixel Dimensions", Self.pixelSizeText(for: previewImage)))
+        } else {
+            items.append(item("Preview UIImage Pixel Dimensions", "Unavailable"))
+        }
+
+        if let fullImage = await originalRenderedImage(for: summary) {
+            items.append(item("Full Rendered UIImage Pixel Dimensions", Self.pixelSizeText(for: fullImage)))
+            items.append(contentsOf: Self.cgImageDiagnosticItems(for: fullImage).map { item($0.label, $0.value) })
+        } else {
+            items.append(item("Full Rendered UIImage Pixel Dimensions", "Unavailable"))
+        }
+
+        if let selectedOriginalResource = PhotoResourceSummary.preferredOriginalPhotoResource(in: resourceSummaries) {
+            items.append(item("Resource Type Selected", selectedOriginalResource.resourceType.displayName))
+            items.append(item("UTI", selectedOriginalResource.uniformTypeIdentifier))
+        } else {
+            items.append(item("Resource Type Selected", "Unavailable"))
+            items.append(item("UTI", "Unavailable"))
+        }
+
+        return items
     }
 
     private func imageProperties(for asset: PHAsset) async -> [String: Any]? {
@@ -696,6 +781,100 @@ final class PhotoLibraryStore: NSObject {
         return CGImagePropertyOrientation(rawValue: rawValue)
     }
 
+    private nonisolated static func decodeDisplayImage(data: Data, orientation: CGImagePropertyOrientation, summary: PhotoAssetSummary) -> UIImage? {
+        guard let image = UIImage(data: data) else {
+            Diagnostics.shared.log("UIImage(data:) failed for \(summary.id).")
+            return nil
+        }
+
+        logCGImageDiagnostics(for: image, context: "UIImage(data:) decoded image", summary: summary)
+
+        if #available(iOS 17.0, *) {
+            // TODO: If the project adopts a public SDK API such as UIImageReader with explicit
+            // preferred dynamic range configuration, prefer that decoder here. Do not convert to
+            // JPEG/PNG, redraw with UIGraphicsImageRenderer, or flatten to sRGB for the HDR path.
+            Diagnostics.shared.log("Decoded \(summary.id) with UIImage(data:). HDR display depends on UIImageView.preferredImageDynamicRange in this build.")
+        }
+
+        return Self.image(image, applying: orientation)
+    }
+
+    private nonisolated static func logImageIOMetadata(
+        in data: Data,
+        context: String,
+        summary: PhotoAssetSummary,
+        uniformTypeIdentifier: String?
+    ) {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            Diagnostics.shared.log("ImageIO \(context) metadata unavailable for \(summary.id): could not create image source.")
+            return
+        }
+
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any] ?? [:]
+        let fileUTI = CGImageSourceGetType(source).map { $0 as String } ?? uniformTypeIdentifier ?? "unknown"
+        let profileName = properties[kCGImagePropertyProfileName as String].map(diagnosticStringValue) ?? "unknown"
+        let colorModel = properties[kCGImagePropertyColorModel as String].map(diagnosticStringValue) ?? "unknown"
+        let depth = properties[kCGImagePropertyDepth as String].map(diagnosticStringValue) ?? "unknown"
+        let pixelWidth = properties[kCGImagePropertyPixelWidth as String].map(diagnosticStringValue) ?? "unknown"
+        let pixelHeight = properties[kCGImagePropertyPixelHeight as String].map(diagnosticStringValue) ?? "unknown"
+        let hdrKeys = hdrRelatedKeys(in: properties)
+        let exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any] ?? [:]
+        let brightness = exif[kCGImagePropertyExifBrightnessValue as String].map(diagnosticStringValue) ?? "unknown"
+        let exposureTime = exif[kCGImagePropertyExifExposureTime as String].map(diagnosticStringValue) ?? "unknown"
+        let fNumber = exif[kCGImagePropertyExifFNumber as String].map(diagnosticStringValue) ?? "unknown"
+        let iso = exif[kCGImagePropertyExifISOSpeedRatings as String].map(diagnosticStringValue) ?? "unknown"
+
+        Diagnostics.shared.log("ImageIO \(context) for \(summary.id): fileUTI \(fileUTI), inputUTI \(uniformTypeIdentifier ?? "unknown"), profile \(profileName), colorModel \(colorModel), depth \(depth), pixels \(pixelWidth)x\(pixelHeight), HDR/gain-map keys \(hdrKeys.isEmpty ? "none" : hdrKeys.joined(separator: ", ")), EXIF brightness \(brightness), exposure \(exposureTime), fNumber \(fNumber), ISO \(iso).")
+    }
+
+    private nonisolated static func logCGImageDiagnostics(for image: UIImage, context: String, summary: PhotoAssetSummary) {
+        let cgImage = image.cgImage
+        let colorSpaceName = cgImage?.colorSpace?.name.map { "\($0)" } ?? "unknown"
+        let imageAssetStatus = image.imageAsset == nil ? "none" : "present"
+        Diagnostics.shared.log("\(context) for \(summary.id): UIImage \(pixelSizeText(for: image)), scale \(image.scale), imageAsset \(imageAssetStatus), CGImage bitsPerComponent \(cgImage?.bitsPerComponent.description ?? "unknown"), bitsPerPixel \(cgImage?.bitsPerPixel.description ?? "unknown"), colorSpace \(colorSpaceName).")
+    }
+
+    private nonisolated static func cgImageDiagnosticItems(for image: UIImage) -> [(label: String, value: String)] {
+        let cgImage = image.cgImage
+        let colorSpaceName = cgImage?.colorSpace?.name.map { "\($0)" } ?? "unknown"
+        return [
+            ("CGImage Color Space", colorSpaceName),
+            ("Bits Per Component", cgImage?.bitsPerComponent.description ?? "unknown"),
+            ("Bits Per Pixel", cgImage?.bitsPerPixel.description ?? "unknown")
+        ]
+    }
+
+    private nonisolated static func hdrRelatedKeys(in metadata: [String: Any]) -> [String] {
+        var matches: [String] = []
+
+        func visit(keyPath: String, value: Any) {
+            let lowered = keyPath.lowercased()
+            if lowered.contains("hdr") ||
+                lowered.contains("gain") ||
+                lowered.contains("headroom") ||
+                lowered.contains("dynamicrange") {
+                matches.append(keyPath)
+            }
+
+            if let dictionary = value as? [String: Any] {
+                for (key, nestedValue) in dictionary {
+                    visit(keyPath: keyPath.isEmpty ? key : "\(keyPath).\(key)", value: nestedValue)
+                }
+            } else if let dictionary = value as? [CFString: Any] {
+                for (key, nestedValue) in dictionary {
+                    let stringKey = key as String
+                    visit(keyPath: keyPath.isEmpty ? stringKey : "\(keyPath).\(stringKey)", value: nestedValue)
+                }
+            }
+        }
+
+        for (key, value) in metadata {
+            visit(keyPath: key, value: value)
+        }
+
+        return Array(Set(matches)).sorted()
+    }
+
     private nonisolated static func image(_ image: UIImage, applying orientation: CGImagePropertyOrientation) -> UIImage {
         guard image.imageOrientation == .up, orientation != .up, let cgImage = image.cgImage else {
             return image
@@ -707,6 +886,19 @@ final class PhotoLibraryStore: NSObject {
         let width = Int((image.size.width * image.scale).rounded())
         let height = Int((image.size.height * image.scale).rounded())
         return "\(width)x\(height)"
+    }
+
+    private nonisolated static func diagnosticStringValue(_ value: Any) -> String {
+        switch value {
+        case let number as NSNumber:
+            return number.stringValue
+        case let string as String:
+            return string
+        case let array as [Any]:
+            return array.map(diagnosticStringValue).joined(separator: ", ")
+        default:
+            return "\(value)"
+        }
     }
 }
 
@@ -760,6 +952,17 @@ private extension PhotoLibraryStore.AuthorizationState {
         case .limited: "limited"
         case .denied: "denied"
         case .restricted: "restricted"
+        }
+    }
+}
+
+private extension UIDisplayGamut {
+    var diagnosticName: String {
+        switch self {
+        case .SRGB: "sRGB"
+        case .P3: "P3"
+        case .unspecified: "unspecified"
+        @unknown default: "unknown"
         }
     }
 }
