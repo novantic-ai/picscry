@@ -157,9 +157,65 @@ final class PhotoLibraryStore: NSObject {
                     return
                 }
                 let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                guard !isDegraded else { return }
+                if isDegraded {
+                    guard deliveryMode == .opportunistic, image != nil else { return }
+                }
                 didResume = true
                 continuation.resume(returning: image)
+            }
+        }
+    }
+
+    func fullQualityImageUpdates(for summary: PhotoAssetSummary) -> AsyncStream<UIImage> {
+        guard let asset = Self.asset(with: summary.id) else {
+            return AsyncStream { continuation in
+                continuation.finish()
+            }
+        }
+
+        let options = PHImageRequestOptions()
+        options.deliveryMode = .opportunistic
+        options.resizeMode = .none
+        options.isNetworkAccessAllowed = true
+        options.version = .current
+
+        return AsyncStream { continuation in
+            let imageManager = PHImageManager.default()
+            let requestToken = ImageRequestToken()
+            requestToken.requestID = imageManager.requestImage(
+                for: asset,
+                targetSize: PHImageManagerMaximumSize,
+                contentMode: .aspectFit,
+                options: options
+            ) { image, info in
+                if (info?[PHImageCancelledKey] as? Bool) == true {
+                    continuation.finish()
+                    return
+                }
+                if let error = info?[PHImageErrorKey] as? Error {
+                    Diagnostics.shared.log("PhotoKit full-quality image request failed: \(error.localizedDescription)")
+                    continuation.finish()
+                    return
+                }
+                guard let image else {
+                    let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                    if !isDegraded {
+                        continuation.finish()
+                    }
+                    return
+                }
+
+                continuation.yield(image)
+
+                let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                if !isDegraded {
+                    continuation.finish()
+                }
+            }
+
+            continuation.onTermination = { _ in
+                guard requestToken.requestID != PHInvalidImageRequestID else { return }
+                imageManager.cancelImageRequest(requestToken.requestID)
             }
         }
     }
@@ -373,6 +429,10 @@ final class PhotoLibraryStore: NSObject {
     private static func asset(with localIdentifier: String) -> PHAsset? {
         PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil).firstObject
     }
+}
+
+private final class ImageRequestToken: @unchecked Sendable {
+    var requestID = PHInvalidImageRequestID
 }
 
 private extension PhotoLibraryStore.AuthorizationState {
