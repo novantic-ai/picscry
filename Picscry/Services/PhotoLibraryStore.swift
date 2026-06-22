@@ -139,6 +139,7 @@ final class PhotoLibraryStore: NSObject {
         options.deliveryMode = deliveryMode
         options.resizeMode = targetSize == PHImageManagerMaximumSize ? .none : .fast
         options.isNetworkAccessAllowed = true
+        options.version = .current
 
         return await withCheckedContinuation { continuation in
             var didResume = false
@@ -170,11 +171,30 @@ final class PhotoLibraryStore: NSObject {
         }
     }
 
+    // PHImageManager.requestImage returns a rendered UIImage suitable for display.
+    // It is not guaranteed to be the original file bytes. Use originalPhotoData(for:)
+    // for the original asset resource without recompression.
     func fullQualityImageUpdates(for summary: PhotoAssetSummary) -> AsyncStream<UIImage> {
-        fullQualityImageUpdates(for: summary, includeDegradedResults: true)
+        AsyncStream { continuation in
+            let task = Task { @MainActor in
+                for await update in fullResolutionRenderedImageUpdates(for: summary) {
+                    guard !Task.isCancelled else {
+                        continuation.finish()
+                        return
+                    }
+                    continuation.yield(update.image)
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in
+                task.cancel()
+            }
+        }
     }
 
-    func displayThenFullQualityImageUpdates(for summary: PhotoAssetSummary, displayTargetSize: CGSize) -> AsyncStream<UIImage> {
+    // Returns display-rendered UIImages: a fast preview followed by the best full-resolution
+    // rendered image PhotoKit can provide. This stream does not expose original file bytes.
+    func displayThenFullQualityImageUpdates(for summary: PhotoAssetSummary, displayTargetSize: CGSize) -> AsyncStream<PhotoDisplayImageUpdate> {
         AsyncStream { continuation in
             let task = Task { @MainActor in
                 if let displayImage = await thumbnail(
@@ -183,7 +203,8 @@ final class PhotoLibraryStore: NSObject {
                     deliveryMode: .highQualityFormat,
                     contentMode: .aspectFit
                 ) {
-                    continuation.yield(displayImage)
+                    Diagnostics.shared.log("Loaded preview image for \(summary.id): asset \(summary.pixelWidth)x\(summary.pixelHeight), UIImage \(Self.pixelSizeText(for: displayImage)).")
+                    continuation.yield(PhotoDisplayImageUpdate(image: displayImage, quality: .preview))
                 }
 
                 guard !Task.isCancelled else {
@@ -191,12 +212,10 @@ final class PhotoLibraryStore: NSObject {
                     return
                 }
 
-                for await fullQualityImage in fullQualityImageUpdates(for: summary, includeDegradedResults: false) {
-                    guard !Task.isCancelled else {
-                        continuation.finish()
-                        return
-                    }
-                    continuation.yield(fullQualityImage)
+                if let renderedImage = await originalRenderedImage(for: summary) {
+                    guard !Task.isCancelled else { return }
+                    Diagnostics.shared.log("Loaded full-resolution rendered image for \(summary.id): asset \(summary.pixelWidth)x\(summary.pixelHeight), UIImage \(Self.pixelSizeText(for: renderedImage)).")
+                    continuation.yield(PhotoDisplayImageUpdate(image: renderedImage, quality: .fullResolutionRendered))
                 }
 
                 continuation.finish()
@@ -206,6 +225,100 @@ final class PhotoLibraryStore: NSObject {
                 task.cancel()
             }
         }
+    }
+
+    // Full-resolution rendered UIImage for display. This is not the original file bytes.
+    // Use originalPhotoData(for:) when exporting, sharing, or inspecting the original asset resource.
+    func fullResolutionRenderedImageUpdates(for summary: PhotoAssetSummary) -> AsyncStream<PhotoDisplayImageUpdate> {
+        fullResolutionRenderedImageUpdates(for: summary, includeDegradedResults: true)
+    }
+
+    func originalPhotoData(for summary: PhotoAssetSummary) async throws -> OriginalPhotoData {
+        guard let asset = Self.asset(with: summary.id) else {
+            throw PhotoLibraryStoreError.assetNotFound
+        }
+
+        let resources = PHAssetResource.assetResources(for: asset)
+        guard let selectedResource = Self.preferredOriginalPhotoResource(in: resources) else {
+            throw PhotoLibraryStoreError.originalPhotoResourceNotFound
+        }
+
+        Diagnostics.shared.log("Selected original asset resource for \(summary.id): type \(selectedResource.type.displayName), filename \(selectedResource.originalFilename), UTI \(selectedResource.uniformTypeIdentifier), asset \(asset.pixelWidth)x\(asset.pixelHeight).")
+
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = true
+
+        let data: Data = try await withCheckedThrowingContinuation { continuation in
+            var accumulatedData = Data()
+            let resourceManager = PHAssetResourceManager.default()
+            resourceManager.requestData(
+                for: selectedResource,
+                options: options,
+                dataReceivedHandler: { chunk in
+                    accumulatedData.append(chunk)
+                },
+                completionHandler: { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: accumulatedData)
+                    }
+                }
+            )
+        }
+
+        let orientation = Self.imageOrientation(in: data)
+        Diagnostics.shared.log("Fetched original asset data for \(summary.id): \(data.count) bytes, type \(selectedResource.type.displayName), filename \(selectedResource.originalFilename), UTI \(selectedResource.uniformTypeIdentifier), orientation \(orientation?.rawValue.description ?? "unknown").")
+
+        return OriginalPhotoData(
+            data: data,
+            uniformTypeIdentifier: selectedResource.uniformTypeIdentifier,
+            originalFilename: selectedResource.originalFilename,
+            orientation: orientation,
+            pixelWidth: asset.pixelWidth,
+            pixelHeight: asset.pixelHeight,
+            resourceType: selectedResource.type
+        )
+    }
+
+    func originalRenderedImage(for summary: PhotoAssetSummary) async -> UIImage? {
+        guard let asset = Self.asset(with: summary.id) else { return nil }
+
+        let options = PHImageRequestOptions()
+        options.isNetworkAccessAllowed = true
+        options.deliveryMode = .highQualityFormat
+        options.resizeMode = .none
+        options.version = .current
+
+        let image: UIImage? = await withCheckedContinuation { continuation in
+            PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, orientation, info in
+                if (info?[PHImageCancelledKey] as? Bool) == true {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                if let error = info?[PHImageErrorKey] as? Error {
+                    Diagnostics.shared.log("PhotoKit original rendered image data request failed: \(error.localizedDescription)")
+                    continuation.resume(returning: nil)
+                    return
+                }
+                guard let data, let image = UIImage(data: data) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                continuation.resume(returning: Self.image(image, applying: orientation))
+            }
+        }
+
+        if let image {
+            Diagnostics.shared.log("Decoded original rendered image data for \(summary.id): asset \(asset.pixelWidth)x\(asset.pixelHeight), UIImage \(Self.pixelSizeText(for: image)).")
+            return image
+        }
+
+        Diagnostics.shared.log("Falling back to PHImageManagerMaximumSize rendered image for \(summary.id).")
+        for await update in fullResolutionRenderedImageUpdates(for: summary, includeDegradedResults: false) {
+            return update.image
+        }
+        return nil
     }
 
     func updateDetailImageCache(for summaries: [PhotoAssetSummary], targetSize: CGSize) {
@@ -257,7 +370,7 @@ final class PhotoLibraryStore: NSObject {
         detailCacheTargetSize = cacheTargetSize
     }
 
-    private func fullQualityImageUpdates(for summary: PhotoAssetSummary, includeDegradedResults: Bool) -> AsyncStream<UIImage> {
+    private func fullResolutionRenderedImageUpdates(for summary: PhotoAssetSummary, includeDegradedResults: Bool) -> AsyncStream<PhotoDisplayImageUpdate> {
         guard let asset = Self.asset(with: summary.id) else {
             return AsyncStream { continuation in
                 continuation.finish()
@@ -298,7 +411,10 @@ final class PhotoLibraryStore: NSObject {
 
                 let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
                 if !isDegraded || includeDegradedResults {
-                    continuation.yield(image)
+                    continuation.yield(PhotoDisplayImageUpdate(
+                        image: image,
+                        quality: isDegraded ? .preview : .fullResolutionRendered
+                    ))
                 }
 
                 if !isDegraded {
@@ -339,6 +455,7 @@ final class PhotoLibraryStore: NSObject {
 
     func metadata(for summary: PhotoAssetSummary) async -> PhotoMetadata {
         guard let asset = Self.asset(with: summary.id) else { return .empty }
+        let resourceSummaries = PHAssetResource.assetResources(for: asset).map(PhotoResourceSummary.init(resource:))
 
         var sections = [
             PhotoMetadataSection(
@@ -349,9 +466,24 @@ final class PhotoLibraryStore: NSObject {
             PhotoMetadataSection(
                 id: "resources",
                 title: "Resources",
-                items: resourceItems(for: PHAssetResource.assetResources(for: asset).map(PhotoResourceSummary.init(resource:)))
+                items: resourceItems(for: resourceSummaries)
             )
         ]
+
+        if let selectedOriginalResource = PhotoResourceSummary.preferredOriginalPhotoResource(in: resourceSummaries) {
+            Diagnostics.shared.log("Metadata selected original resource candidate for \(summary.id): type \(selectedOriginalResource.resourceType.displayName), filename \(selectedOriginalResource.originalFilename), UTI \(selectedOriginalResource.uniformTypeIdentifier), asset \(asset.pixelWidth)x\(asset.pixelHeight).")
+            sections.append(
+                PhotoMetadataSection(
+                    id: "selected-original-resource",
+                    title: "Original Data Candidate",
+                    items: [
+                        item("Resource Type", selectedOriginalResource.resourceType.displayName),
+                        item("Filename", selectedOriginalResource.originalFilename),
+                        item("Uniform Type", selectedOriginalResource.uniformTypeIdentifier)
+                    ]
+                )
+            )
+        }
 
         if asset.mediaType == .image, let imageProperties = await imageProperties(for: asset), !imageProperties.isEmpty {
             sections.append(
@@ -542,6 +674,76 @@ final class PhotoLibraryStore: NSObject {
             width: max(1, min(targetSize.width, 3_000)),
             height: max(1, min(targetSize.height, 3_000))
         )
+    }
+
+    private nonisolated static func preferredOriginalPhotoResource(in resources: [PHAssetResource]) -> PHAssetResource? {
+        resources
+            .filter { $0.type.isOriginalPhotoDataCandidate }
+            .min { lhs, rhs in
+                let lhsPriority = lhs.type.originalPhotoDataPriority
+                let rhsPriority = rhs.type.originalPhotoDataPriority
+                if lhsPriority != rhsPriority { return lhsPriority < rhsPriority }
+                return lhs.originalFilename.localizedStandardCompare(rhs.originalFilename) == .orderedAscending
+            }
+    }
+
+    private nonisolated static func imageOrientation(in data: Data) -> CGImagePropertyOrientation? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let rawValue = properties[kCGImagePropertyOrientation] as? UInt32 else {
+            return nil
+        }
+        return CGImagePropertyOrientation(rawValue: rawValue)
+    }
+
+    private nonisolated static func image(_ image: UIImage, applying orientation: CGImagePropertyOrientation) -> UIImage {
+        guard image.imageOrientation == .up, orientation != .up, let cgImage = image.cgImage else {
+            return image
+        }
+        return UIImage(cgImage: cgImage, scale: image.scale, orientation: UIImage.Orientation(orientation))
+    }
+
+    private nonisolated static func pixelSizeText(for image: UIImage) -> String {
+        let width = Int((image.size.width * image.scale).rounded())
+        let height = Int((image.size.height * image.scale).rounded())
+        return "\(width)x\(height)"
+    }
+}
+
+enum PhotoLibraryStoreError: LocalizedError {
+    case assetNotFound
+    case originalPhotoResourceNotFound
+
+    var errorDescription: String? {
+        switch self {
+        case .assetNotFound:
+            return "The selected PhotoKit asset could not be found."
+        case .originalPhotoResourceNotFound:
+            return "The selected PhotoKit asset does not have an original photo resource."
+        }
+    }
+}
+
+private extension UIImage.Orientation {
+    init(_ cgImageOrientation: CGImagePropertyOrientation) {
+        switch cgImageOrientation {
+        case .up:
+            self = .up
+        case .upMirrored:
+            self = .upMirrored
+        case .down:
+            self = .down
+        case .downMirrored:
+            self = .downMirrored
+        case .left:
+            self = .left
+        case .leftMirrored:
+            self = .leftMirrored
+        case .right:
+            self = .right
+        case .rightMirrored:
+            self = .rightMirrored
+        }
     }
 }
 

@@ -1,7 +1,44 @@
 import CoreGraphics
 import CoreLocation
 import Foundation
+import ImageIO
 import Photos
+import UIKit
+
+enum PhotoQualityMode {
+    case fastPreview
+    case fullResolutionRendered
+    case originalAssetData
+}
+
+enum LoadedImageQuality {
+    case preview
+    case fullResolutionRendered
+}
+
+struct PhotoDisplayImageUpdate {
+    let image: UIImage
+    let quality: LoadedImageQuality
+}
+
+struct PhotoDisplayQualityState {
+    static func nextQuality(current: LoadedImageQuality?, incoming: LoadedImageQuality) -> LoadedImageQuality {
+        if current == .fullResolutionRendered && incoming == .preview {
+            return .fullResolutionRendered
+        }
+        return incoming
+    }
+}
+
+struct OriginalPhotoData {
+    let data: Data
+    let uniformTypeIdentifier: String
+    let originalFilename: String
+    let orientation: CGImagePropertyOrientation?
+    let pixelWidth: Int
+    let pixelHeight: Int
+    let resourceType: PHAssetResourceType
+}
 
 struct PhotoAssetSummary: Identifiable {
     let id: String
@@ -129,6 +166,23 @@ struct PhotoResourceSummary: Identifiable {
         uniformTypeIdentifier = resource.uniformTypeIdentifier
         resourceType = resource.type
     }
+
+    init(originalFilename: String, uniformTypeIdentifier: String, resourceType: PHAssetResourceType) {
+        self.originalFilename = originalFilename
+        self.uniformTypeIdentifier = uniformTypeIdentifier
+        self.resourceType = resourceType
+    }
+
+    static func preferredOriginalPhotoResource(in resources: [PhotoResourceSummary]) -> PhotoResourceSummary? {
+        resources
+            .filter { $0.resourceType.isOriginalPhotoDataCandidate }
+            .min { lhs, rhs in
+                let lhsPriority = lhs.resourceType.originalPhotoDataPriority
+                let rhsPriority = rhs.resourceType.originalPhotoDataPriority
+                if lhsPriority != rhsPriority { return lhsPriority < rhsPriority }
+                return lhs.originalFilename.localizedStandardCompare(rhs.originalFilename) == .orderedAscending
+            }
+    }
 }
 
 extension PHAssetMediaType {
@@ -148,6 +202,24 @@ extension PHAssetMediaType {
 }
 
 extension PHAssetResourceType {
+    var isOriginalPhotoDataCandidate: Bool {
+        switch self {
+        case .fullSizePhoto, .photo, .alternatePhoto:
+            return true
+        default:
+            return false
+        }
+    }
+
+    var originalPhotoDataPriority: Int {
+        switch self {
+        case .fullSizePhoto: 0
+        case .photo: 1
+        case .alternatePhoto: 2
+        default: Int.max
+        }
+    }
+
     var displayName: String {
         switch self {
         case .photo: "Photo"

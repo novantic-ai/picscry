@@ -113,7 +113,7 @@ private struct MediaDetailPage: View {
     @Binding var isShowingMetadata: Bool
 
     @State private var image: UIImage?
-    @State private var loadedImageSize: CGSize = .zero
+    @State private var loadedImageQuality: LoadedImageQuality?
     @State private var player: AVPlayer?
     @State private var metadata: PhotoMetadata = .empty
     @State private var isLoadingMedia = false
@@ -174,10 +174,20 @@ private struct MediaDetailPage: View {
                         .foregroundStyle(.secondary)
                 }
             } else if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: fittedImageSize(in: availableSize).width, height: fittedImageSize(in: availableSize).height)
+                ZoomableImageView(image: image, accessibilityLabel: asset.accessibilitySummary)
+                    .frame(width: availableSize.width, height: availableSize.height)
+
+                if loadedImageQuality == .preview && isLoadingMedia {
+                    VStack {
+                        Spacer()
+                        ProgressView()
+                            .controlSize(.small)
+                            .padding(10)
+                            .background(.regularMaterial, in: Circle())
+                            .padding(.bottom, 16)
+                    }
+                    .accessibilityHidden(true)
+                }
             } else if isLoadingMedia {
                 ProgressView("Loading Image")
             } else {
@@ -212,19 +222,6 @@ private struct MediaDetailPage: View {
         isShowingMetadata ? size.height * 0.62 : size.height
     }
 
-    private func fittedImageSize(in availableSize: CGSize) -> CGSize {
-        let aspectRatio = loadedImageSize == .zero ? asset.aspectRatio : loadedImageSize.width / max(loadedImageSize.height, 1)
-        guard aspectRatio.isFinite, aspectRatio > 0, availableSize.width > 0, availableSize.height > 0 else {
-            return availableSize
-        }
-
-        let availableRatio = availableSize.width / availableSize.height
-        if aspectRatio > availableRatio {
-            return CGSize(width: availableSize.width, height: availableSize.width / aspectRatio)
-        }
-        return CGSize(width: availableSize.height * aspectRatio, height: availableSize.height)
-    }
-
     private func loadMedia(displaySize: CGSize) async {
         guard !isLoadingMedia, image == nil, player == nil else { return }
         isLoadingMedia = true
@@ -242,14 +239,113 @@ private struct MediaDetailPage: View {
             displayTargetSize: displayTargetSize(for: displaySize)
         ) {
             guard !Task.isCancelled else { return }
-            image = updatedImage
-            loadedImageSize = updatedImage.size
+            image = updatedImage.image
+            loadedImageQuality = PhotoDisplayQualityState.nextQuality(
+                current: loadedImageQuality,
+                incoming: updatedImage.quality
+            )
+            Diagnostics.shared.log("Detail image quality state for \(asset.id): \(updatedImage.quality.diagnosticName).")
         }
     }
 
     private func displayTargetSize(for displaySize: CGSize) -> CGSize {
         let scale = UIScreen.main.scale
         return CGSize(width: displaySize.width * scale, height: displaySize.height * scale)
+    }
+}
+
+private struct ZoomableImageView: UIViewRepresentable {
+    let image: UIImage
+    let accessibilityLabel: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIView(context: Context) -> UIScrollView {
+        let scrollView = UIScrollView()
+        scrollView.delegate = context.coordinator
+        scrollView.minimumZoomScale = 1
+        scrollView.maximumZoomScale = 4
+        scrollView.bouncesZoom = true
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.backgroundColor = .clear
+        scrollView.accessibilityLabel = accessibilityLabel
+
+        let imageView = UIImageView(image: image)
+        imageView.contentMode = .scaleAspectFit
+        imageView.frame = scrollView.bounds
+        imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        imageView.isAccessibilityElement = true
+        imageView.accessibilityLabel = accessibilityLabel
+
+        scrollView.addSubview(imageView)
+        context.coordinator.imageView = imageView
+        context.coordinator.imageIdentifier = ObjectIdentifier(image)
+        return scrollView
+    }
+
+    func updateUIView(_ scrollView: UIScrollView, context: Context) {
+        guard let imageView = context.coordinator.imageView else { return }
+
+        let nextIdentifier = ObjectIdentifier(image)
+        let didChangeImage = context.coordinator.imageIdentifier != nextIdentifier
+        imageView.image = image
+        imageView.accessibilityLabel = accessibilityLabel
+        scrollView.accessibilityLabel = accessibilityLabel
+        imageView.frame = scrollView.bounds
+        updateZoomScales(for: scrollView, image: image)
+
+        if didChangeImage {
+            scrollView.setZoomScale(1, animated: false)
+            context.coordinator.imageIdentifier = nextIdentifier
+        }
+    }
+
+    private func updateZoomScales(for scrollView: UIScrollView, image: UIImage) {
+        scrollView.minimumZoomScale = 1
+        scrollView.maximumZoomScale = maximumZoomScale(for: image, in: scrollView.bounds.size)
+    }
+
+    private func maximumZoomScale(for image: UIImage, in boundsSize: CGSize) -> CGFloat {
+        guard boundsSize.width > 0, boundsSize.height > 0, image.size.width > 0, image.size.height > 0 else {
+            return 4
+        }
+
+        let imageAspectRatio = image.size.width / image.size.height
+        let boundsAspectRatio = boundsSize.width / boundsSize.height
+        let fittedSize: CGSize
+        if imageAspectRatio > boundsAspectRatio {
+            fittedSize = CGSize(width: boundsSize.width, height: boundsSize.width / imageAspectRatio)
+        } else {
+            fittedSize = CGSize(width: boundsSize.height * imageAspectRatio, height: boundsSize.height)
+        }
+
+        let screenScale = UIScreen.main.scale
+        let pixelWidth = image.size.width * image.scale
+        let pixelHeight = image.size.height * image.scale
+        let widthScale = pixelWidth / max(fittedSize.width * screenScale, 1)
+        let heightScale = pixelHeight / max(fittedSize.height * screenScale, 1)
+        return max(4, widthScale, heightScale)
+    }
+
+    final class Coordinator: NSObject, UIScrollViewDelegate {
+        weak var imageView: UIImageView?
+        var imageIdentifier: ObjectIdentifier?
+
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+            imageView
+        }
+    }
+}
+
+private extension LoadedImageQuality {
+    var diagnosticName: String {
+        switch self {
+        case .preview: "preview"
+        case .fullResolutionRendered: "fullResolutionRendered"
+        }
     }
 }
 
