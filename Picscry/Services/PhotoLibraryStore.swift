@@ -29,6 +29,8 @@ final class PhotoLibraryStore: NSObject {
     private let imageManager = PHCachingImageManager()
     private var hasRegisteredChangeObserver = false
     private var reloadTask: Task<Void, Never>?
+    private var detailCacheIdentifiers: Set<String> = []
+    private var detailCacheTargetSize: CGSize?
 
     override init() {
         super.init()
@@ -73,6 +75,8 @@ final class PhotoLibraryStore: NSObject {
         totalAssetCount = result.count
         Diagnostics.shared.log("Starting PhotoKit fetch for \(result.count) photo and video assets.")
         imageManager.stopCachingImagesForAllAssets()
+        detailCacheIdentifiers.removeAll()
+        detailCacheTargetSize = nil
 
         let task = Task { @MainActor in
             let batchSize = 150
@@ -167,6 +171,93 @@ final class PhotoLibraryStore: NSObject {
     }
 
     func fullQualityImageUpdates(for summary: PhotoAssetSummary) -> AsyncStream<UIImage> {
+        fullQualityImageUpdates(for: summary, includeDegradedResults: true)
+    }
+
+    func displayThenFullQualityImageUpdates(for summary: PhotoAssetSummary, displayTargetSize: CGSize) -> AsyncStream<UIImage> {
+        AsyncStream { continuation in
+            let task = Task { @MainActor in
+                if let displayImage = await thumbnail(
+                    for: summary,
+                    targetSize: Self.normalizedTargetSize(displayTargetSize),
+                    deliveryMode: .highQualityFormat,
+                    contentMode: .aspectFit
+                ) {
+                    continuation.yield(displayImage)
+                }
+
+                guard !Task.isCancelled else {
+                    continuation.finish()
+                    return
+                }
+
+                for await fullQualityImage in fullQualityImageUpdates(for: summary, includeDegradedResults: false) {
+                    guard !Task.isCancelled else {
+                        continuation.finish()
+                        return
+                    }
+                    continuation.yield(fullQualityImage)
+                }
+
+                continuation.finish()
+            }
+
+            continuation.onTermination = { _ in
+                task.cancel()
+            }
+        }
+    }
+
+    func updateDetailImageCache(for summaries: [PhotoAssetSummary], targetSize: CGSize) {
+        let imageSummaries = summaries.filter { !$0.isVideo }
+        let nextIdentifiers = Set(imageSummaries.map(\.id))
+        let cacheTargetSize = Self.normalizedTargetSize(targetSize)
+        let options = PHImageRequestOptions()
+        options.deliveryMode = .opportunistic
+        options.resizeMode = .fast
+        options.isNetworkAccessAllowed = true
+        options.version = .current
+
+        if let previousTargetSize = detailCacheTargetSize,
+           previousTargetSize != cacheTargetSize,
+           !detailCacheIdentifiers.isEmpty {
+            imageManager.stopCachingImages(
+                for: Self.assets(with: Array(detailCacheIdentifiers)),
+                targetSize: previousTargetSize,
+                contentMode: .aspectFit,
+                options: options
+            )
+            detailCacheIdentifiers.removeAll()
+        }
+
+        let identifiersToStop = detailCacheIdentifiers.subtracting(nextIdentifiers)
+        let identifiersToStart = nextIdentifiers.subtracting(detailCacheIdentifiers)
+
+        if !identifiersToStop.isEmpty {
+            let assetsToStop = Self.assets(with: Array(identifiersToStop))
+            imageManager.stopCachingImages(
+                for: assetsToStop,
+                targetSize: cacheTargetSize,
+                contentMode: .aspectFit,
+                options: options
+            )
+        }
+
+        if !identifiersToStart.isEmpty {
+            let assetsToStart = Self.assets(with: Array(identifiersToStart))
+            imageManager.startCachingImages(
+                for: assetsToStart,
+                targetSize: cacheTargetSize,
+                contentMode: .aspectFit,
+                options: options
+            )
+        }
+
+        detailCacheIdentifiers = nextIdentifiers
+        detailCacheTargetSize = cacheTargetSize
+    }
+
+    private func fullQualityImageUpdates(for summary: PhotoAssetSummary, includeDegradedResults: Bool) -> AsyncStream<UIImage> {
         guard let asset = Self.asset(with: summary.id) else {
             return AsyncStream { continuation in
                 continuation.finish()
@@ -174,7 +265,7 @@ final class PhotoLibraryStore: NSObject {
         }
 
         let options = PHImageRequestOptions()
-        options.deliveryMode = .opportunistic
+        options.deliveryMode = includeDegradedResults ? .opportunistic : .highQualityFormat
         options.resizeMode = .none
         options.isNetworkAccessAllowed = true
         options.version = .current
@@ -205,9 +296,11 @@ final class PhotoLibraryStore: NSObject {
                     return
                 }
 
-                continuation.yield(image)
-
                 let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                if !isDegraded || includeDegradedResults {
+                    continuation.yield(image)
+                }
+
                 if !isDegraded {
                     continuation.finish()
                 }
@@ -428,6 +521,27 @@ final class PhotoLibraryStore: NSObject {
 
     private static func asset(with localIdentifier: String) -> PHAsset? {
         PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil).firstObject
+    }
+
+    private static func assets(with localIdentifiers: [String]) -> [PHAsset] {
+        let fetchResult = PHAsset.fetchAssets(withLocalIdentifiers: localIdentifiers, options: nil)
+        var assets: [PHAsset] = []
+        assets.reserveCapacity(fetchResult.count)
+        fetchResult.enumerateObjects { asset, _, _ in
+            assets.append(asset)
+        }
+        return assets
+    }
+
+    private static func normalizedTargetSize(_ targetSize: CGSize) -> CGSize {
+        guard targetSize.width.isFinite, targetSize.height.isFinite, targetSize.width > 0, targetSize.height > 0 else {
+            return CGSize(width: 1_600, height: 1_600)
+        }
+
+        return CGSize(
+            width: max(1, min(targetSize.width, 3_000)),
+            height: max(1, min(targetSize.height, 3_000))
+        )
     }
 }
 
