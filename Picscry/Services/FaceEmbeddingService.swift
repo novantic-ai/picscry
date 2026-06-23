@@ -112,8 +112,12 @@ private enum FaceEmbeddingServiceError: LocalizedError {
     }
 }
 
-private struct FaceEmbeddingFeatureProvider: MLFeatureProvider {
+private final class FaceEmbeddingFeatureProvider: MLFeatureProvider {
     let input: MLMultiArray
+
+    init(input: MLMultiArray) {
+        self.input = input
+    }
 
     var featureNames: Set<String> {
         ["data"]
