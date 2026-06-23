@@ -37,7 +37,25 @@ struct PersonSummary: Identifiable, Hashable {
     let photoCount: Int
     let faceCount: Int
     let representativeFaceImageData: Data?
-    let isProvisional: Bool = false
+    let isProvisional: Bool
+
+    init(
+        id: UUID,
+        displayName: String,
+        isUnknown: Bool,
+        photoCount: Int,
+        faceCount: Int,
+        representativeFaceImageData: Data?,
+        isProvisional: Bool = false
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.isUnknown = isUnknown
+        self.photoCount = photoCount
+        self.faceCount = faceCount
+        self.representativeFaceImageData = representativeFaceImageData
+        self.isProvisional = isProvisional
+    }
 }
 
 struct PhotoFaceSummary: Identifiable, Hashable {
