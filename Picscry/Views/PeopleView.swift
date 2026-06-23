@@ -4,19 +4,19 @@ struct PeopleView: View {
     @Environment(PhotoLibraryStore.self) private var photoLibraryStore
     @Environment(FaceRecognitionStore.self) private var faceRecognitionStore
 
-    private var sortedPeople: [PersonSummary] {
-        PeopleOrdering.sorted(faceRecognitionStore.people)
+    private var displayedPeople: [PersonSummary] {
+        faceRecognitionStore.people
     }
 
     var body: some View {
         List {
             statusSection
 
-            if sortedPeople.isEmpty {
+            if displayedPeople.isEmpty {
                 emptySection
             } else {
                 Section("People") {
-                    ForEach(sortedPeople) { person in
+                    ForEach(displayedPeople, id: \.id) { person in
                         NavigationLink {
                             PersonDetailView(personID: person.id)
                         } label: {
@@ -25,6 +25,11 @@ struct PeopleView: View {
                         .accessibilityLabel("\(person.displayName), \(person.photoCount) photos")
                     }
                 }
+            }
+        }
+        .transaction { transaction in
+            if case .indexing = faceRecognitionStore.indexingState {
+                transaction.animation = nil
             }
         }
         .navigationTitle("People")
@@ -41,13 +46,15 @@ struct PeopleView: View {
 
     @ViewBuilder
     private var statusSection: some View {
-        switch faceRecognitionStore.indexingState {
-        case let .indexing(processed, total):
-            Section {
+        Section {
+            switch faceRecognitionStore.indexingState {
+            case let .indexing(processed, total):
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Indexing faces: \(processed) of \(total) photos")
                         .font(.headline)
                     ProgressView(value: Double(processed), total: Double(max(total, 1)))
+                        .accessibilityLabel("Face indexing progress")
+                        .accessibilityValue("\(processed) of \(total) photos indexed")
                     if let message = faceRecognitionStore.currentIndexingMessage {
                         Text(message)
                             .font(.footnote)
@@ -58,13 +65,9 @@ struct PeopleView: View {
                         .foregroundStyle(.secondary)
                 }
                 .padding(.vertical, 4)
-            }
-        case let .failed(message):
-            Section {
+            case let .failed(message):
                 Label(message, systemImage: "exclamationmark.triangle")
-            }
-        default:
-            Section {
+            default:
                 VStack(alignment: .leading, spacing: 6) {
                     if let summary = faceRecognitionStore.lastIndexingSummary {
                         Text(summary)

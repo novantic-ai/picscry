@@ -6,13 +6,19 @@ import UIKit
 struct FaceRecognitionConfiguration {
     var faceProcessingMaxDimension: CGFloat = 1_600
     var minimumFacePixelSize: CGFloat = 48
-    var autoMatchThreshold: Float = 0.72
-    var possibleMatchThreshold: Float = 0.62
-    var mergeThreshold: Float = 0.68
+    var autoMatchThreshold: Float = 0.84
+    var possibleMatchThreshold: Float = 0.76
+    var mergeThreshold: Float = 0.82
+    var singleSampleAutoMatchThreshold: Float = 0.88
+    var disallowMultipleFacesFromSameAssetForSamePerson: Bool = true
     var representativeThumbnailSize: CGFloat = 256
+    var avatarPaddingRatio: CGFloat = 0.85
+    var modelInputPaddingRatio: CGFloat = 0.25
     var indexingBatchSize: Int = 20
     var embeddingDimension = 128
     var faceImageRequestTimeoutSeconds: TimeInterval = 45
+    var peopleRefreshBatchSize: Int = 50
+    var databaseSaveBatchSize: Int = 100
 }
 
 struct PersonSummary: Identifiable, Hashable {

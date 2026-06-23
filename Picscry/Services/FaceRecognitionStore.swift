@@ -76,15 +76,17 @@ final class FaceRecognitionStore {
         }
 
         let assets = photoLibraryStore.assets.filter { !$0.isVideo }
+        let totalEligibleImageCount = assets.count
         let liveIDs = Set(assets.map(\.id))
         removeDeletedAssets(liveIDs: liveIDs)
 
         let pending = assets.filter { assetNeedsIndex($0) }
+        let alreadyIndexedCount = max(0, totalEligibleImageCount - pending.count)
         guard !pending.isEmpty else {
-            refreshPeople()
+            refreshPeople(persist: true, allowReorder: true)
             indexingState = .idle
             currentIndexingMessage = nil
-            lastIndexingSummary = "No pending photos. \(facesByID.count) indexed faces across \(people.count) people."
+            lastIndexingSummary = "All \(totalEligibleImageCount) photos are indexed. \(facesByID.count) faces across \(people.count) people."
             Diagnostics.shared.log("Face indexing skipped (\(reason)): no pending photos out of \(assets.count) image assets. Existing observations: \(facesByID.count).")
             scheduleBackgroundIndexing(reason: "no pending photos after \(reason)")
             return
@@ -94,7 +96,13 @@ final class FaceRecognitionStore {
         scheduleBackgroundIndexing(reason: "indexing started from \(reason)")
 
         let task = Task { @MainActor in
-            await index(pending: pending, photoLibraryStore: photoLibraryStore, reason: reason)
+            await index(
+                pending: pending,
+                totalEligibleImageCount: totalEligibleImageCount,
+                alreadyIndexedCount: alreadyIndexedCount,
+                photoLibraryStore: photoLibraryStore,
+                reason: reason
+            )
         }
         indexingTask = task
         if waitForCompletion {
@@ -183,22 +191,30 @@ final class FaceRecognitionStore {
         refreshPeople()
     }
 
-    private func index(pending: [PhotoAssetSummary], photoLibraryStore: PhotoLibraryStore, reason: String) async {
+    private func index(
+        pending: [PhotoAssetSummary],
+        totalEligibleImageCount: Int,
+        alreadyIndexedCount: Int,
+        photoLibraryStore: PhotoLibraryStore,
+        reason: String
+    ) async {
         let indexingStartedAt = Date()
-        indexingState = .indexing(processed: 0, total: pending.count)
+        var processedThisRun = 0
+        var processedOverall = alreadyIndexedCount
+        indexingState = .indexing(processed: processedOverall, total: totalEligibleImageCount)
         currentIndexingMessage = "Starting face indexing..."
-        var processed = 0
 
         for (offset, asset) in pending.enumerated() {
             guard !Task.isCancelled else {
                 indexingState = .paused
-                currentIndexingMessage = "Face indexing paused at \(processed) of \(pending.count)."
-                Diagnostics.shared.log("Face indexing paused (\(reason)) after \(processed) of \(pending.count) photos in \(Self.durationText(since: indexingStartedAt)).")
+                currentIndexingMessage = "Face indexing paused at \(processedOverall) of \(totalEligibleImageCount)."
+                savePersistedState()
+                Diagnostics.shared.log("Face indexing paused (\(reason)) at \(processedOverall) of \(totalEligibleImageCount) photos in \(Self.durationText(since: indexingStartedAt)).")
                 return
             }
 
             let assetStartedAt = Date()
-            currentIndexingMessage = "Processing photo \(offset + 1) of \(pending.count)"
+            currentIndexingMessage = "Processing photo \(min(processedOverall + 1, totalEligibleImageCount)) of \(totalEligibleImageCount)"
             Diagnostics.shared.log("Face indexing asset \(offset + 1)/\(pending.count) started: \(asset.id), pixels \(asset.pixelWidth)x\(asset.pixelHeight), modified \(asset.modificationDate?.description ?? "unknown").")
 
             do {
@@ -209,23 +225,32 @@ final class FaceRecognitionStore {
                 Diagnostics.shared.log("Face indexing failed for \(asset.id): \(error.localizedDescription)")
             }
 
-            processed += 1
-            indexingState = .indexing(processed: processed, total: pending.count)
-            if processed == 1 || processed.isMultiple(of: 10) {
-                currentIndexingMessage = "Indexed \(processed) of \(pending.count) photos"
-                Diagnostics.shared.log("Face indexing progress (\(reason)): \(processed)/\(pending.count) photos in \(Self.durationText(since: indexingStartedAt)).")
+            processedThisRun += 1
+            processedOverall = min(totalEligibleImageCount, alreadyIndexedCount + processedThisRun)
+            indexingState = .indexing(processed: processedOverall, total: totalEligibleImageCount)
+            if processedThisRun == 1 || processedThisRun.isMultiple(of: 10) {
+                currentIndexingMessage = "Indexed \(processedOverall) of \(totalEligibleImageCount) photos"
+                Diagnostics.shared.log("Face indexing progress (\(reason)): \(processedOverall)/\(totalEligibleImageCount) photos in \(Self.durationText(since: indexingStartedAt)).")
             }
-            if processed.isMultiple(of: configuration.indexingBatchSize) {
-                refreshPeople()
+
+            if processedThisRun.isMultiple(of: configuration.peopleRefreshBatchSize) {
+                refreshPeople(persist: false, allowReorder: false)
+            }
+
+            if processedThisRun.isMultiple(of: configuration.indexingBatchSize) {
                 await Task.yield()
+            }
+
+            if processedThisRun.isMultiple(of: configuration.databaseSaveBatchSize) {
+                savePersistedState()
             }
         }
 
-        refreshPeople()
+        refreshPeople(persist: true, allowReorder: true)
         indexingState = .idle
         currentIndexingMessage = nil
-        lastIndexingSummary = "Indexed \(pending.count) photos in \(Self.durationText(since: indexingStartedAt)). Found \(facesByID.count) faces across \(people.count) people."
-        Diagnostics.shared.log("Face indexing finished (\(reason)) for \(pending.count) photos in \(Self.durationText(since: indexingStartedAt)) with \(facesByID.count) face observations across \(people.count) people.")
+        lastIndexingSummary = "Indexed \(processedThisRun) photos in \(Self.durationText(since: indexingStartedAt)). \(facesByID.count) faces across \(people.count) people."
+        Diagnostics.shared.log("Face indexing finished (\(reason)) at \(processedOverall)/\(totalEligibleImageCount) photos in \(Self.durationText(since: indexingStartedAt)) with \(facesByID.count) face observations across \(people.count) people.")
     }
 
     private func process(asset: PhotoAssetSummary, photoLibraryStore: PhotoLibraryStore) async throws -> [FaceObservationInput] {
@@ -287,11 +312,37 @@ final class FaceRecognitionStore {
             deletePersonIfEmpty(personID)
         }
 
+        var personIDsAssignedInCurrentAsset = Set<UUID>()
+        var savedObservationCount = 0
         for observation in observations {
+            guard observation.embedding.count == configuration.embeddingDimension,
+                  observation.embedding.allSatisfy(\.isFinite) else {
+                Diagnostics.shared.log("Skipping invalid face embedding for asset \(asset.id), face \(observation.leftToRightIndex + 1).")
+                continue
+            }
+
+            let norm = sqrt(observation.embedding.reduce(Float(0)) { $0 + ($1 * $1) })
+            guard norm > 0.95, norm < 1.05 else {
+                Diagnostics.shared.log("Skipping non-normalized face embedding for asset \(asset.id), face \(observation.leftToRightIndex + 1), norm \(norm).")
+                continue
+            }
+
             let clusters = persons.values.map {
                 FaceCluster(personID: $0.id, centroid: $0.centroid, faceCount: faceCount(for: $0.id), name: $0.name)
             }
-            let assignment = clusteringEngine.assignment(for: observation.embedding, clusters: clusters)
+            let excludedPersonIDs: Set<UUID> = configuration.disallowMultipleFacesFromSameAssetForSamePerson
+                ? personIDsAssignedInCurrentAsset
+                : []
+            let bestCandidate = clusteringEngine.bestCandidate(
+                for: observation.embedding,
+                clusters: clusters,
+                excluding: excludedPersonIDs
+            )
+            let assignment = clusteringEngine.assignment(
+                for: observation.embedding,
+                clusters: clusters,
+                excluding: excludedPersonIDs
+            )
             let personID: UUID
 
             switch assignment.kind {
@@ -306,9 +357,12 @@ final class FaceRecognitionStore {
             facesByID[face.id] = face
             faceIDsByAssetID[asset.id, default: []].append(face.id)
             recompute(personID: personID)
+            personIDsAssignedInCurrentAsset.insert(personID)
+            savedObservationCount += 1
+            Diagnostics.shared.log("Face clustering asset \(asset.id), face \(observation.leftToRightIndex + 1): best similarity \(bestCandidate?.similarity.description ?? "none"), excluded \(excludedPersonIDs.count), assigned person \(personID), assignment \(assignment.kind).")
         }
 
-        indexRecords[asset.id] = AssetIndexRecord(asset: asset, faceCount: observations.count)
+        indexRecords[asset.id] = AssetIndexRecord(asset: asset, faceCount: savedObservationCount)
     }
 
     private func assetNeedsIndex(_ asset: PhotoAssetSummary) -> Bool {
@@ -351,9 +405,48 @@ final class FaceRecognitionStore {
         )
     }
 
-    private func refreshPeople() {
-        people = PeopleOrdering.sorted(persons.keys.compactMap(summary(for:)))
-        savePersistedState()
+    private func refreshPeople(persist: Bool = true, allowReorder: Bool = true) {
+        let summaries = makePeopleSummaries()
+        let refreshedPeople = allowReorder
+            ? PeopleOrdering.sorted(summaries)
+            : stablePeopleUpdate(existing: people, refreshed: summaries)
+
+        if Self.peopleHaveMeaningfulDifference(people, refreshedPeople) {
+            people = refreshedPeople
+        }
+
+        if persist {
+            savePersistedState()
+        }
+    }
+
+    private func makePeopleSummaries() -> [PersonSummary] {
+        persons.keys.compactMap(summary(for:))
+    }
+
+    private func stablePeopleUpdate(existing: [PersonSummary], refreshed: [PersonSummary]) -> [PersonSummary] {
+        let refreshedByID = Dictionary(uniqueKeysWithValues: refreshed.map { ($0.id, $0) })
+        var result = existing.compactMap { refreshedByID[$0.id] }
+
+        let existingIDs = Set(existing.map(\.id))
+        let newPeople = refreshed.filter { !existingIDs.contains($0.id) }
+        result.append(contentsOf: PeopleOrdering.sorted(newPeople))
+        return result
+    }
+
+    private static func peopleHaveMeaningfulDifference(_ lhs: [PersonSummary], _ rhs: [PersonSummary]) -> Bool {
+        guard lhs.count == rhs.count else { return true }
+        for (left, right) in zip(lhs, rhs) {
+            if left.id != right.id ||
+                left.displayName != right.displayName ||
+                left.isUnknown != right.isUnknown ||
+                left.photoCount != right.photoCount ||
+                left.faceCount != right.faceCount ||
+                left.representativeFaceImageData?.count != right.representativeFaceImageData?.count {
+                return true
+            }
+        }
+        return false
     }
 
     private func recompute(personID: UUID) {
@@ -417,15 +510,33 @@ final class FaceRecognitionStore {
         do {
             let data = try Data(contentsOf: url)
             let snapshot = try JSONDecoder().decode(FaceDatabaseSnapshot.self, from: data)
+            guard snapshot.schemaVersion == FaceDatabaseSchema.currentVersion else {
+                Diagnostics.shared.log("Discarding old face database schema \(snapshot.schemaVersion); current schema is \(FaceDatabaseSchema.currentVersion). Reindex required.")
+                resetPersistedState(at: url)
+                lastIndexingSummary = "Face recognition was upgraded. Picscry will reindex faces on this device."
+                return
+            }
+
             persons = Dictionary(uniqueKeysWithValues: snapshot.persons.map { ($0.id, $0) })
             facesByID = Dictionary(uniqueKeysWithValues: snapshot.faces.map { ($0.id, $0) })
             faceIDsByAssetID = snapshot.faceIDsByAssetID
             indexRecords = snapshot.indexRecords
-            refreshPeople()
+            refreshPeople(persist: false, allowReorder: true)
             Diagnostics.shared.log("Loaded persisted face database with \(persons.count) people and \(facesByID.count) faces.")
         } catch {
-            Diagnostics.shared.log("Failed to load persisted face database: \(error.localizedDescription)")
+            Diagnostics.shared.log("Face database is incompatible or unreadable: \(error.localizedDescription). Resetting face index.")
+            resetPersistedState(at: url)
+            lastIndexingSummary = "Face recognition was upgraded. Picscry will reindex faces on this device."
         }
+    }
+
+    private func resetPersistedState(at url: URL) {
+        persons = [:]
+        facesByID = [:]
+        faceIDsByAssetID = [:]
+        indexRecords = [:]
+        try? FileManager.default.removeItem(at: url)
+        refreshPeople(persist: false, allowReorder: true)
     }
 
     private func savePersistedState() {
@@ -437,6 +548,7 @@ final class FaceRecognitionStore {
                 withIntermediateDirectories: true
             )
             let snapshot = FaceDatabaseSnapshot(
+                schemaVersion: FaceDatabaseSchema.currentVersion,
                 persons: Array(persons.values),
                 faces: Array(facesByID.values),
                 faceIDsByAssetID: faceIDsByAssetID,
@@ -469,7 +581,12 @@ final class FaceRecognitionStore {
     }
 }
 
+private enum FaceDatabaseSchema {
+    static let currentVersion = 2
+}
+
 private struct FaceDatabaseSnapshot: Codable {
+    let schemaVersion: Int
     let persons: [StoredPerson]
     let faces: [StoredFaceObservation]
     let faceIDsByAssetID: [String: [UUID]]

@@ -21,22 +21,36 @@ final class FaceCropService {
             return nil
         }
 
-        let paddedRect = Self.paddedRect(pixelRect, paddingRatio: 0.25, imageSize: imageSize)
-        guard let initialCrop = cgImage.cropping(to: paddedRect.integral) else { return nil }
-        let crop = Self.eyeAlignedCrop(
-            initialCrop,
-            detectedFace: detectedFace,
-            paddedRect: paddedRect,
+        let modelRect = Self.paddedRect(
+            pixelRect,
+            paddingRatio: configuration.modelInputPaddingRatio,
             imageSize: imageSize
-        ) ?? initialCrop
+        )
+        guard let initialModelCrop = cgImage.cropping(to: modelRect.integral) else { return nil }
+        let modelCrop = Self.eyeAlignedCrop(
+            initialModelCrop,
+            detectedFace: detectedFace,
+            paddedRect: modelRect,
+            imageSize: imageSize
+        ) ?? initialModelCrop
+
+        let avatarRect = Self.squareAvatarRect(
+            around: pixelRect,
+            paddingRatio: configuration.avatarPaddingRatio,
+            imageSize: imageSize
+        )
+        let avatarCrop = cgImage.cropping(to: avatarRect.integral) ?? initialModelCrop
 
         let areaRatio = Float((pixelRect.width * pixelRect.height) / max(imageSize.width * imageSize.height, 1))
         let areaScore = min(max(areaRatio * 20, 0), 1)
         let quality = (detectedFace.confidence * 0.5) + (areaScore * 0.3) + ((detectedFace.quality ?? 0.5) * 0.2)
 
         return FaceCropResult(
-            modelInputImage: crop,
-            avatarImageData: Self.jpegData(from: crop, size: configuration.representativeThumbnailSize),
+            modelInputImage: modelCrop,
+            avatarImageData: Self.jpegDataPreservingAspectRatio(
+                from: avatarCrop,
+                size: configuration.representativeThumbnailSize
+            ),
             qualityScore: quality
         )
     }
@@ -58,15 +72,59 @@ final class FaceCropService {
             .intersection(CGRect(origin: .zero, size: imageSize))
     }
 
-    private static func jpegData(from cgImage: CGImage, size: CGFloat) -> Data? {
+    static func squareAvatarRect(around rect: CGRect, paddingRatio: CGFloat, imageSize: CGSize) -> CGRect {
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let side = max(rect.width, rect.height) * (1 + (paddingRatio * 2))
+        var square = CGRect(
+            x: center.x - side / 2,
+            y: center.y - side / 2,
+            width: side,
+            height: side
+        )
+
+        if square.minX < 0 { square.origin.x = 0 }
+        if square.minY < 0 { square.origin.y = 0 }
+        if square.maxX > imageSize.width { square.origin.x = max(0, imageSize.width - square.width) }
+        if square.maxY > imageSize.height { square.origin.y = max(0, imageSize.height - square.height) }
+
+        square = square.intersection(CGRect(origin: .zero, size: imageSize))
+        let finalSide = min(square.width, square.height)
+        return CGRect(
+            x: square.midX - finalSide / 2,
+            y: square.midY - finalSide / 2,
+            width: finalSide,
+            height: finalSide
+        )
+        .intersection(CGRect(origin: .zero, size: imageSize))
+    }
+
+    private static func jpegDataPreservingAspectRatio(from cgImage: CGImage, size: CGFloat) -> Data? {
         let image = UIImage(cgImage: cgImage)
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
-        let renderer = UIGraphicsImageRenderer(size: CGSize(width: size, height: size), format: format)
-        let rendered = renderer.image { _ in
-            image.draw(in: CGRect(x: 0, y: 0, width: size, height: size))
+        format.opaque = true
+
+        let target = CGSize(width: size, height: size)
+        let renderer = UIGraphicsImageRenderer(size: target, format: format)
+        let rendered = renderer.image { context in
+            UIColor.systemBackground.setFill()
+            context.fill(CGRect(origin: .zero, size: target))
+
+            let sourceSize = CGSize(width: cgImage.width, height: cgImage.height)
+            guard sourceSize.width > 0, sourceSize.height > 0 else { return }
+
+            let scale = max(target.width / sourceSize.width, target.height / sourceSize.height)
+            let drawSize = CGSize(width: sourceSize.width * scale, height: sourceSize.height * scale)
+            let drawRect = CGRect(
+                x: (target.width - drawSize.width) / 2,
+                y: (target.height - drawSize.height) / 2,
+                width: drawSize.width,
+                height: drawSize.height
+            )
+
+            image.draw(in: drawRect)
         }
-        return rendered.jpegData(compressionQuality: 0.82)
+        return rendered.jpegData(compressionQuality: 0.9)
     }
 
     private static func eyeAlignedCrop(

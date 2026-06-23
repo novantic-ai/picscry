@@ -12,6 +12,8 @@ struct FaceAvatarView: View {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
+                    .frame(width: size, height: size)
+                    .clipped()
             } else {
                 Image(systemName: "person.crop.circle.fill")
                     .resizable()

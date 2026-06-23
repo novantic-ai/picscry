@@ -29,8 +29,13 @@ final class FaceClusteringEngine {
         self.configuration = configuration
     }
 
-    func bestCandidate(for embedding: [Float], clusters: [FaceCluster]) -> ClusterCandidate? {
+    func bestCandidate(
+        for embedding: [Float],
+        clusters: [FaceCluster],
+        excluding excludedPersonIDs: Set<UUID> = []
+    ) -> ClusterCandidate? {
         clusters
+            .filter { !excludedPersonIDs.contains($0.personID) }
             .compactMap { cluster -> ClusterCandidate? in
                 guard !cluster.centroid.isEmpty else { return nil }
                 return ClusterCandidate(
@@ -41,12 +46,21 @@ final class FaceClusteringEngine {
             .max { $0.similarity < $1.similarity }
     }
 
-    func assignment(for embedding: [Float], clusters: [FaceCluster]) -> FaceClusterAssignment {
-        guard let best = bestCandidate(for: embedding, clusters: clusters) else {
+    func assignment(
+        for embedding: [Float],
+        clusters: [FaceCluster],
+        excluding excludedPersonIDs: Set<UUID> = []
+    ) -> FaceClusterAssignment {
+        guard let best = bestCandidate(for: embedding, clusters: clusters, excluding: excludedPersonIDs),
+              let bestCluster = clusters.first(where: { $0.personID == best.personID }) else {
             return FaceClusterAssignment(kind: .newPerson)
         }
 
-        if best.similarity >= configuration.autoMatchThreshold {
+        let requiredAutoThreshold = bestCluster.faceCount <= 1
+            ? configuration.singleSampleAutoMatchThreshold
+            : configuration.autoMatchThreshold
+
+        if best.similarity >= requiredAutoThreshold {
             return FaceClusterAssignment(kind: .existingPerson(best.personID, similarity: best.similarity))
         }
 
