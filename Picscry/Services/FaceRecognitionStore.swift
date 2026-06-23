@@ -801,6 +801,26 @@ private struct StoredPerson: Codable {
 
     var displayName: String { name ?? "Unknown" }
     var isUnknown: Bool { name == nil }
+
+    init(
+        id: UUID,
+        name: String?,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date(),
+        centroid: [Float] = [],
+        representativeImageData: Data? = nil,
+        isAutomaticCluster: Bool = true,
+        isProvisional: Bool = false
+    ) {
+        self.id = id
+        self.name = name
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.centroid = centroid
+        self.representativeImageData = representativeImageData
+        self.isAutomaticCluster = isAutomaticCluster
+        self.isProvisional = isProvisional
+    }
 }
 
 private struct StoredFaceObservation: Codable {
