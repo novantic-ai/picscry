@@ -12,6 +12,7 @@ struct FaceRecognitionConfiguration {
     var representativeThumbnailSize: CGFloat = 256
     var indexingBatchSize: Int = 20
     var embeddingDimension = 128
+    var faceImageRequestTimeoutSeconds: TimeInterval = 45
 }
 
 struct PersonSummary: Identifiable, Hashable {

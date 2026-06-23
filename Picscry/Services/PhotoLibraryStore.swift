@@ -65,6 +65,20 @@ final class PhotoLibraryStore: NSObject {
         await reloadAssets()
     }
 
+    func prepareLibraryIfAuthorized() async {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        authorizationState = Self.authorizationState(from: status)
+
+        guard authorizationState.canReadLibrary else {
+            Diagnostics.shared.log("Skipping background PhotoKit fetch because authorization is \(authorizationState.diagnosticName).")
+            return
+        }
+
+        Diagnostics.shared.log("Preparing PhotoKit library for background face indexing.")
+        registerForChangesIfNeeded()
+        await reloadAssets()
+    }
+
     func reloadAssets() async {
         guard authorizationState.canReadLibrary else { return }
         reloadTask?.cancel()
@@ -346,29 +360,53 @@ final class PhotoLibraryStore: NSObject {
 
     func imageForFaceProcessing(
         for summary: PhotoAssetSummary,
-        maxDimension: CGFloat = 1_600
+        maxDimension: CGFloat = 1_600,
+        timeoutSeconds: TimeInterval = 45
     ) async -> FaceProcessingImage? {
-        guard !summary.isVideo, let asset = Self.asset(with: summary.id) else { return nil }
+        guard !summary.isVideo, let asset = Self.asset(with: summary.id) else {
+            Diagnostics.shared.log("Face image request skipped for \(summary.id): asset unavailable or video.")
+            return nil
+        }
 
         let options = PHImageRequestOptions()
         options.isNetworkAccessAllowed = true
         options.deliveryMode = .highQualityFormat
         options.resizeMode = .fast
         options.version = .current
+        let startedAt = Date()
+        Diagnostics.shared.log("Face image request started for \(summary.id): asset \(summary.pixelWidth)x\(summary.pixelHeight), maxDimension \(Int(maxDimension.rounded())).")
 
         return await withCheckedContinuation { continuation in
-            PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, orientation, info in
+            let requestToken = ImageRequestToken()
+            let timeoutTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: UInt64(max(timeoutSeconds, 1) * 1_000_000_000))
+                guard !requestToken.didResume else { return }
+                requestToken.didResume = true
+                if requestToken.requestID != PHInvalidImageRequestID {
+                    PHImageManager.default().cancelImageRequest(requestToken.requestID)
+                }
+                Diagnostics.shared.log("Face image request timed out for \(summary.id) after \(Self.durationText(since: startedAt)); moving to next asset.")
+                continuation.resume(returning: nil)
+            }
+
+            requestToken.requestID = PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, orientation, info in
+                guard !requestToken.didResume else { return }
+                requestToken.didResume = true
+                timeoutTask.cancel()
+
                 if (info?[PHImageCancelledKey] as? Bool) == true {
+                    Diagnostics.shared.log("Face image request cancelled for \(summary.id) after \(Self.durationText(since: startedAt)).")
                     continuation.resume(returning: nil)
                     return
                 }
                 if let error = info?[PHImageErrorKey] as? Error {
-                    Diagnostics.shared.log("PhotoKit face processing image request failed: \(error.localizedDescription)")
+                    Diagnostics.shared.log("Face image request failed for \(summary.id) after \(Self.durationText(since: startedAt)): \(error.localizedDescription)")
                     continuation.resume(returning: nil)
                     return
                 }
                 guard let data,
                       let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+                    Diagnostics.shared.log("Face image request returned undecodable data for \(summary.id) after \(Self.durationText(since: startedAt)).")
                     continuation.resume(returning: nil)
                     return
                 }
@@ -379,11 +417,13 @@ final class PhotoLibraryStore: NSObject {
                     kCGImageSourceCreateThumbnailWithTransform: true
                 ]
                 guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+                    Diagnostics.shared.log("Face image thumbnail decode failed for \(summary.id) after \(Self.durationText(since: startedAt)).")
                     continuation.resume(returning: nil)
                     return
                 }
 
                 let image = UIImage(cgImage: cgImage, scale: 1, orientation: UIImage.Orientation(orientation))
+                Diagnostics.shared.log("Face image request finished for \(summary.id) in \(Self.durationText(since: startedAt)): decoded \(cgImage.width)x\(cgImage.height), orientation \(orientation.rawValue).")
                 continuation.resume(returning: FaceProcessingImage(
                     image: image,
                     cgImage: cgImage,
@@ -952,6 +992,10 @@ final class PhotoLibraryStore: NSObject {
         return "\(width)x\(height)"
     }
 
+    private nonisolated static func durationText(since startDate: Date) -> String {
+        String(format: "%.2fs", Date().timeIntervalSince(startDate))
+    }
+
     private nonisolated static func diagnosticStringValue(_ value: Any) -> String {
         switch value {
         case let number as NSNumber:
@@ -1005,6 +1049,7 @@ private extension UIImage.Orientation {
 
 private final class ImageRequestToken: @unchecked Sendable {
     var requestID = PHInvalidImageRequestID
+    var didResume = false
 }
 
 private extension PhotoLibraryStore.AuthorizationState {

@@ -1,3 +1,4 @@
+import BackgroundTasks
 import Foundation
 import Observation
 import UIKit
@@ -5,9 +6,13 @@ import UIKit
 @MainActor
 @Observable
 final class FaceRecognitionStore {
+    nonisolated static let backgroundTaskIdentifier = "com.novanticai.picscry.face-indexing"
+
     var people: [PersonSummary] = []
     var indexingState: FaceIndexingState = .idle
     var errorMessage: String?
+    var currentIndexingMessage: String?
+    var lastIndexingSummary: String?
 
     private let configuration: FaceRecognitionConfiguration
     private let detectionService: FaceDetectionService
@@ -31,9 +36,42 @@ final class FaceRecognitionStore {
     }
 
     func prepare(photoLibraryStore: PhotoLibraryStore) async {
+        await startIndexing(photoLibraryStore: photoLibraryStore, reason: "foreground", waitForCompletion: false)
+    }
+
+    func runBackgroundIndexing(photoLibraryStore: PhotoLibraryStore) async {
+        await startIndexing(photoLibraryStore: photoLibraryStore, reason: "background task", waitForCompletion: true)
+    }
+
+    func retry(photoLibraryStore: PhotoLibraryStore) async {
+        await startIndexing(photoLibraryStore: photoLibraryStore, reason: "manual refresh", waitForCompletion: false)
+    }
+
+    func scheduleBackgroundIndexing(reason: String) {
+        let request = BGProcessingTaskRequest(identifier: Self.backgroundTaskIdentifier)
+        request.requiresNetworkConnectivity = false
+        request.requiresExternalPower = false
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
+
+        do {
+            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.backgroundTaskIdentifier)
+            try BGTaskScheduler.shared.submit(request)
+            Diagnostics.shared.log("Scheduled face indexing background task: \(reason).")
+        } catch {
+            Diagnostics.shared.log("Failed to schedule face indexing background task (\(reason)): \(error.localizedDescription)")
+        }
+    }
+
+    private func startIndexing(
+        photoLibraryStore: PhotoLibraryStore,
+        reason: String,
+        waitForCompletion: Bool
+    ) async {
         indexingTask?.cancel()
         guard await embeddingService.isModelAvailable else {
             indexingState = .failed("Face recognition model could not be loaded.")
+            currentIndexingMessage = nil
+            Diagnostics.shared.log("Face indexing not started (\(reason)): model unavailable.")
             return
         }
 
@@ -45,18 +83,23 @@ final class FaceRecognitionStore {
         guard !pending.isEmpty else {
             refreshPeople()
             indexingState = .idle
+            currentIndexingMessage = nil
+            lastIndexingSummary = "No pending photos. \(facesByID.count) indexed faces across \(people.count) people."
+            Diagnostics.shared.log("Face indexing skipped (\(reason)): no pending photos out of \(assets.count) image assets. Existing observations: \(facesByID.count).")
+            scheduleBackgroundIndexing(reason: "no pending photos after \(reason)")
             return
         }
 
-        Diagnostics.shared.log("Face indexing starting for \(pending.count) photos.")
-        indexingTask = Task { @MainActor in
-            await index(pending: pending, photoLibraryStore: photoLibraryStore)
-        }
-        await indexingTask?.value
-    }
+        Diagnostics.shared.log("Face indexing starting (\(reason)): \(pending.count) pending photos out of \(assets.count) image assets. Existing index records: \(indexRecords.count), people: \(persons.count), faces: \(facesByID.count).")
+        scheduleBackgroundIndexing(reason: "indexing started from \(reason)")
 
-    func retry(photoLibraryStore: PhotoLibraryStore) async {
-        await prepare(photoLibraryStore: photoLibraryStore)
+        let task = Task { @MainActor in
+            await index(pending: pending, photoLibraryStore: photoLibraryStore, reason: reason)
+        }
+        indexingTask = task
+        if waitForCompletion {
+            await task.value
+        }
     }
 
     func faces(for asset: PhotoAssetSummary) async -> [PhotoFaceSummary] {
@@ -140,25 +183,38 @@ final class FaceRecognitionStore {
         refreshPeople()
     }
 
-    private func index(pending: [PhotoAssetSummary], photoLibraryStore: PhotoLibraryStore) async {
+    private func index(pending: [PhotoAssetSummary], photoLibraryStore: PhotoLibraryStore, reason: String) async {
+        let indexingStartedAt = Date()
         indexingState = .indexing(processed: 0, total: pending.count)
+        currentIndexingMessage = "Starting face indexing..."
         var processed = 0
 
-        for asset in pending {
+        for (offset, asset) in pending.enumerated() {
             guard !Task.isCancelled else {
                 indexingState = .paused
+                currentIndexingMessage = "Face indexing paused at \(processed) of \(pending.count)."
+                Diagnostics.shared.log("Face indexing paused (\(reason)) after \(processed) of \(pending.count) photos in \(Self.durationText(since: indexingStartedAt)).")
                 return
             }
+
+            let assetStartedAt = Date()
+            currentIndexingMessage = "Processing photo \(offset + 1) of \(pending.count)"
+            Diagnostics.shared.log("Face indexing asset \(offset + 1)/\(pending.count) started: \(asset.id), pixels \(asset.pixelWidth)x\(asset.pixelHeight), modified \(asset.modificationDate?.description ?? "unknown").")
 
             do {
                 let observations = try await process(asset: asset, photoLibraryStore: photoLibraryStore)
                 saveAndCluster(observations, asset: asset)
+                Diagnostics.shared.log("Face indexing asset \(offset + 1)/\(pending.count) finished in \(Self.durationText(since: assetStartedAt)): \(asset.id), saved \(observations.count) face observations.")
             } catch {
                 Diagnostics.shared.log("Face indexing failed for \(asset.id): \(error.localizedDescription)")
             }
 
             processed += 1
             indexingState = .indexing(processed: processed, total: pending.count)
+            if processed == 1 || processed.isMultiple(of: 10) {
+                currentIndexingMessage = "Indexed \(processed) of \(pending.count) photos"
+                Diagnostics.shared.log("Face indexing progress (\(reason)): \(processed)/\(pending.count) photos in \(Self.durationText(since: indexingStartedAt)).")
+            }
             if processed.isMultiple(of: configuration.indexingBatchSize) {
                 refreshPeople()
                 await Task.yield()
@@ -167,32 +223,46 @@ final class FaceRecognitionStore {
 
         refreshPeople()
         indexingState = .idle
-        Diagnostics.shared.log("Face indexing finished for \(pending.count) photos with \(facesByID.count) face observations.")
+        currentIndexingMessage = nil
+        lastIndexingSummary = "Indexed \(pending.count) photos in \(Self.durationText(since: indexingStartedAt)). Found \(facesByID.count) faces across \(people.count) people."
+        Diagnostics.shared.log("Face indexing finished (\(reason)) for \(pending.count) photos in \(Self.durationText(since: indexingStartedAt)) with \(facesByID.count) face observations across \(people.count) people.")
     }
 
     private func process(asset: PhotoAssetSummary, photoLibraryStore: PhotoLibraryStore) async throws -> [FaceObservationInput] {
+        let imageStartedAt = Date()
         guard let processingImage = await photoLibraryStore.imageForFaceProcessing(
             for: asset,
-            maxDimension: configuration.faceProcessingMaxDimension
+            maxDimension: configuration.faceProcessingMaxDimension,
+            timeoutSeconds: configuration.faceImageRequestTimeoutSeconds
         ) else {
+            Diagnostics.shared.log("Face indexing asset \(asset.id): no processing image after \(Self.durationText(since: imageStartedAt)); recording zero faces.")
             return []
         }
+        Diagnostics.shared.log("Face indexing asset \(asset.id): processing image ready in \(Self.durationText(since: imageStartedAt)), decoded \(processingImage.pixelWidth)x\(processingImage.pixelHeight).")
 
+        let detectionStartedAt = Date()
         let detectedFaces = try await detectionService.detectFaces(
             in: processingImage.cgImage,
             orientation: processingImage.orientation
         )
+        Diagnostics.shared.log("Face indexing asset \(asset.id): Vision detected \(detectedFaces.count) faces in \(Self.durationText(since: detectionStartedAt)).")
 
         var observations: [FaceObservationInput] = []
         observations.reserveCapacity(detectedFaces.count)
         for (index, detectedFace) in detectedFaces.enumerated() {
+            let faceStartedAt = Date()
             guard let crop = cropService.cropFace(
                 from: processingImage.cgImage,
                 detectedFace: detectedFace,
                 configuration: configuration
-            ) else { continue }
+            ) else {
+                Diagnostics.shared.log("Face indexing asset \(asset.id): face \(index + 1)/\(detectedFaces.count) crop skipped.")
+                continue
+            }
 
+            let embeddingStartedAt = Date()
             let embedding = try await embeddingService.embedding(for: crop.modelInputImage)
+            Diagnostics.shared.log("Face indexing asset \(asset.id): face \(index + 1)/\(detectedFaces.count) embedded in \(Self.durationText(since: embeddingStartedAt)); total face time \(Self.durationText(since: faceStartedAt)), confidence \(detectedFace.confidence).")
             observations.append(FaceObservationInput(
                 assetLocalIdentifier: asset.id,
                 assetModificationDate: asset.modificationDate,
@@ -392,6 +462,10 @@ final class FaceRecognitionStore {
             .joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return collapsed.isEmpty ? nil : collapsed
+    }
+
+    private static func durationText(since startDate: Date) -> String {
+        String(format: "%.2fs", Date().timeIntervalSince(startDate))
     }
 }
 

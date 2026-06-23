@@ -48,6 +48,11 @@ struct PeopleView: View {
                     Text("Indexing faces: \(processed) of \(total) photos")
                         .font(.headline)
                     ProgressView(value: Double(processed), total: Double(max(total, 1)))
+                    if let message = faceRecognitionStore.currentIndexingMessage {
+                        Text(message)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                     Text("Face recognition happens on this device. Photos and face data are not uploaded.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -60,9 +65,15 @@ struct PeopleView: View {
             }
         default:
             Section {
-                Text("Face recognition happens on this device. Photos and face data are not uploaded.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 6) {
+                    if let summary = faceRecognitionStore.lastIndexingSummary {
+                        Text(summary)
+                            .font(.footnote)
+                    }
+                    Text("Face recognition happens on this device. Photos and face data are not uploaded.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }
