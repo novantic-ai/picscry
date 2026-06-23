@@ -6,6 +6,7 @@ struct FaceCropResult {
     let modelInputImage: CGImage
     let avatarImageData: Data?
     let qualityScore: Float
+    let alignmentQuality: Float
 }
 
 final class FaceCropService {
@@ -27,12 +28,12 @@ final class FaceCropService {
             imageSize: imageSize
         )
         guard let initialModelCrop = cgImage.cropping(to: modelRect.integral) else { return nil }
-        let modelCrop = Self.eyeAlignedCrop(
-            initialModelCrop,
+        let alignedCrop = Self.alignedModelCrop(
+            from: cgImage,
             detectedFace: detectedFace,
-            paddedRect: modelRect,
             imageSize: imageSize
-        ) ?? initialModelCrop
+        )
+        let modelCrop = alignedCrop?.image ?? Self.resizedSquareCrop(initialModelCrop, size: 112) ?? initialModelCrop
 
         let avatarRect = Self.squareAvatarRect(
             around: pixelRect,
@@ -51,7 +52,8 @@ final class FaceCropService {
                 from: avatarCrop,
                 size: configuration.representativeThumbnailSize
             ),
-            qualityScore: quality
+            qualityScore: quality,
+            alignmentQuality: alignedCrop?.quality ?? 0
         )
     }
 
@@ -127,27 +129,46 @@ final class FaceCropService {
         return rendered.jpegData(compressionQuality: 0.9)
     }
 
-    private static func eyeAlignedCrop(
-        _ crop: CGImage,
+    private static func alignedModelCrop(
+        from cgImage: CGImage,
         detectedFace: DetectedFace,
-        paddedRect: CGRect,
         imageSize: CGSize
-    ) -> CGImage? {
+    ) -> (image: CGImage, quality: Float)? {
         guard let landmarks = detectedFace.landmarks,
               let leftEye = landmarks.leftEye,
               let rightEye = landmarks.rightEye,
               let leftCenter = landmarkCenter(leftEye, faceBox: detectedFace.normalizedBoundingBox, imageSize: imageSize),
-              let rightCenter = landmarkCenter(rightEye, faceBox: detectedFace.normalizedBoundingBox, imageSize: imageSize) else {
+              let rightCenter = landmarkCenter(rightEye, faceBox: detectedFace.normalizedBoundingBox, imageSize: imageSize),
+              let mouthCenter = mouthCenter(from: landmarks, faceBox: detectedFace.normalizedBoundingBox, imageSize: imageSize) else {
             return nil
         }
 
-        let cropLeftEye = CGPoint(x: leftCenter.x - paddedRect.minX, y: leftCenter.y - paddedRect.minY)
-        let cropRightEye = CGPoint(x: rightCenter.x - paddedRect.minX, y: rightCenter.y - paddedRect.minY)
-        let angle = atan2(cropRightEye.y - cropLeftEye.y, cropRightEye.x - cropLeftEye.x)
-        guard angle.isFinite, abs(angle) > 0.01 else { return nil }
+        let sourceEyeDelta = CGPoint(x: rightCenter.x - leftCenter.x, y: rightCenter.y - leftCenter.y)
+        let sourceEyeDistance = hypot(sourceEyeDelta.x, sourceEyeDelta.y)
+        guard sourceEyeDistance.isFinite, sourceEyeDistance > 1 else { return nil }
 
-        let width = crop.width
-        let height = crop.height
+        let targetLeftEye = CGPoint(x: 38.2946, y: 51.6963)
+        let targetRightEye = CGPoint(x: 73.5318, y: 51.5014)
+        let targetMouthCenter = CGPoint(x: 56.1396, y: 92.2848)
+        let targetEyeDelta = CGPoint(x: targetRightEye.x - targetLeftEye.x, y: targetRightEye.y - targetLeftEye.y)
+        let targetEyeDistance = hypot(targetEyeDelta.x, targetEyeDelta.y)
+        let sourceAngle = atan2(sourceEyeDelta.y, sourceEyeDelta.x)
+        let targetAngle = atan2(targetEyeDelta.y, targetEyeDelta.x)
+        let scale = targetEyeDistance / sourceEyeDistance
+        guard scale.isFinite, scale > 0 else { return nil }
+
+        let sourceEyeMid = CGPoint(x: (leftCenter.x + rightCenter.x) / 2, y: (leftCenter.y + rightCenter.y) / 2)
+        let targetEyeMid = CGPoint(x: (targetLeftEye.x + targetRightEye.x) / 2, y: (targetLeftEye.y + targetRightEye.y) / 2)
+        let rotation = targetAngle - sourceAngle
+
+        var transform = CGAffineTransform.identity
+        transform = transform.translatedBy(x: targetEyeMid.x, y: targetEyeMid.y)
+        transform = transform.rotated(by: rotation)
+        transform = transform.scaledBy(x: scale, y: scale)
+        transform = transform.translatedBy(x: -sourceEyeMid.x, y: -sourceEyeMid.y)
+
+        let width = 112
+        let height = 112
         let bytesPerRow = width * 4
         var pixels = [UInt8](repeating: 0, count: height * bytesPerRow)
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
@@ -158,16 +179,57 @@ final class FaceCropService {
                 bitsPerComponent: 8,
                 bytesPerRow: bytesPerRow,
                 space: colorSpace,
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
               ) else {
             return nil
         }
 
-        context.translateBy(x: CGFloat(width) / 2, y: CGFloat(height) / 2)
-        context.rotate(by: -angle)
-        context.translateBy(x: -CGFloat(width) / 2, y: -CGFloat(height) / 2)
-        context.draw(crop, in: CGRect(x: 0, y: 0, width: width, height: height))
+        context.interpolationQuality = .high
+        context.setFillColor(UIColor.black.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.concatenate(transform)
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height))
+        guard let rendered = context.makeImage() else { return nil }
+
+        let transformedMouth = mouthCenter.applying(transform)
+        let mouthError = hypot(transformedMouth.x - targetMouthCenter.x, transformedMouth.y - targetMouthCenter.y)
+        let quality = Float(max(0, min(1, 1 - (mouthError / 56))))
+        return (rendered, quality)
+    }
+
+    private static func resizedSquareCrop(_ crop: CGImage, size: Int) -> CGImage? {
+        let bytesPerRow = size * 4
+        var pixels = [UInt8](repeating: 0, count: size * bytesPerRow)
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                data: &pixels,
+                width: size,
+                height: size,
+                bitsPerComponent: 8,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+              ) else {
+            return nil
+        }
+
+        context.interpolationQuality = .high
+        context.draw(crop, in: CGRect(x: 0, y: 0, width: size, height: size))
         return context.makeImage()
+    }
+
+    private static func mouthCenter(
+        from landmarks: VNFaceLandmarks2D,
+        faceBox: CGRect,
+        imageSize: CGSize
+    ) -> CGPoint? {
+        if let outerLips = landmarks.outerLips, outerLips.pointCount > 0 {
+            return landmarkCenter(outerLips, faceBox: faceBox, imageSize: imageSize)
+        }
+        if let innerLips = landmarks.innerLips, innerLips.pointCount > 0 {
+            return landmarkCenter(innerLips, faceBox: faceBox, imageSize: imageSize)
+        }
+        return nil
     }
 
     private static func landmarkCenter(

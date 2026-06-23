@@ -7,6 +7,8 @@ import UIKit
 actor FaceEmbeddingService {
     private static let inputSize = 112
     private let model: MLModel?
+    private var didLogModelOutput = false
+    private var didLogEmbeddingStats = false
 
     init(configuration: FaceRecognitionConfiguration = FaceRecognitionConfiguration()) {
         let modelConfiguration = MLModelConfiguration()
@@ -29,10 +31,23 @@ actor FaceEmbeddingService {
 
         let input = try Self.multiArrayInput(from: faceImage)
         let output = try await model.prediction(from: FaceEmbeddingFeatureProvider(input: input))
+        if !didLogModelOutput {
+            didLogModelOutput = true
+            Diagnostics.shared.log("Face embedding model output feature names: \(output.featureNames.sorted().joined(separator: ", ")).")
+        }
         guard let embedding = output.featureValue(for: "fc1")?.multiArrayValue else {
             throw FaceEmbeddingServiceError.outputUnavailable
         }
-        return Self.floatArray(from: embedding).l2Normalized()
+        let raw = Self.floatArray(from: embedding)
+        if !didLogEmbeddingStats {
+            didLogEmbeddingStats = true
+            let norm = sqrt(raw.reduce(Float(0)) { $0 + ($1 * $1) })
+            let minValue = raw.min() ?? 0
+            let maxValue = raw.max() ?? 0
+            let mean = raw.isEmpty ? 0 : raw.reduce(Float(0), +) / Float(raw.count)
+            Diagnostics.shared.log("Face embedding raw stats: count \(raw.count), min \(minValue), max \(maxValue), mean \(mean), norm \(norm).")
+        }
+        return raw.l2Normalized()
     }
 
     private static func multiArrayInput(from image: CGImage) throws -> MLMultiArray {
@@ -49,7 +64,7 @@ actor FaceEmbeddingService {
                 bitsPerComponent: 8,
                 bytesPerRow: bytesPerRow,
                 space: colorSpace,
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                bitmapInfo: rgbaBitmapInfo
               ) else {
             throw FaceEmbeddingServiceError.inputCreationFailed
         }
@@ -79,6 +94,21 @@ actor FaceEmbeddingService {
         }
 
         return array
+    }
+
+    static func debugBGRChannelsForFirstPixel(from image: CGImage) throws -> (blue: Double, green: Double, red: Double) {
+        let array = try multiArrayInput(from: image)
+        let pointer = array.dataPointer.bindMemory(to: Double.self, capacity: array.count)
+        let channelStride = array.strides[0].intValue
+        return (
+            blue: pointer[0],
+            green: pointer[channelStride],
+            red: pointer[channelStride * 2]
+        )
+    }
+
+    private static var rgbaBitmapInfo: UInt32 {
+        CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
     }
 
     private static func floatArray(from multiArray: MLMultiArray) -> [Float] {

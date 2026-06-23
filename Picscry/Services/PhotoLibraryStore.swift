@@ -26,10 +26,12 @@ final class PhotoLibraryStore: NSObject {
     var errorMessage: String?
     var totalAssetCount = 0
     var libraryVersion = UUID()
+    var assetCollectionFingerprint = ""
 
     private let imageManager = PHCachingImageManager()
     private var hasRegisteredChangeObserver = false
     private var reloadTask: Task<Void, Never>?
+    private var photoLibraryChangeTask: Task<Void, Never>?
     private var detailCacheIdentifiers: Set<String> = []
     private var detailCacheTargetSize: CGSize?
 
@@ -102,7 +104,7 @@ final class PhotoLibraryStore: NSObject {
 
             guard result.count > 0 else {
                 assets = []
-                libraryVersion = UUID()
+                publishLibraryVersionIfFingerprintChanged(for: [])
                 isLoading = false
                 Diagnostics.shared.log("Finished PhotoKit fetch with 0 media summaries.")
                 return
@@ -134,7 +136,7 @@ final class PhotoLibraryStore: NSObject {
             if !shouldPublishIncrementally {
                 assets = refreshedAssets
             }
-            libraryVersion = UUID()
+            publishLibraryVersionIfFingerprintChanged(for: assets)
             isLoading = false
             Diagnostics.shared.log("Finished PhotoKit fetch with \(assets.count) media summaries.")
         }
@@ -422,12 +424,12 @@ final class PhotoLibraryStore: NSObject {
                     return
                 }
 
-                let image = UIImage(cgImage: cgImage, scale: 1, orientation: UIImage.Orientation(orientation))
-                Diagnostics.shared.log("Face image request finished for \(summary.id) in \(Self.durationText(since: startedAt)): decoded \(cgImage.width)x\(cgImage.height), orientation \(orientation.rawValue).")
+                let image = UIImage(cgImage: cgImage, scale: 1, orientation: .up)
+                Diagnostics.shared.log("Face image request finished for \(summary.id) in \(Self.durationText(since: startedAt)): decoded \(cgImage.width)x\(cgImage.height), original orientation \(orientation.rawValue), processing orientation up.")
                 continuation.resume(returning: FaceProcessingImage(
                     image: image,
                     cgImage: cgImage,
-                    orientation: orientation,
+                    orientation: .up,
                     pixelWidth: cgImage.width,
                     pixelHeight: cgImage.height
                 ))
@@ -829,6 +831,24 @@ final class PhotoLibraryStore: NSObject {
         hasRegisteredChangeObserver = true
     }
 
+    private func publishLibraryVersionIfFingerprintChanged(for assets: [PhotoAssetSummary]) {
+        let nextFingerprint = Self.fingerprint(for: assets)
+        if nextFingerprint != assetCollectionFingerprint {
+            assetCollectionFingerprint = nextFingerprint
+            libraryVersion = UUID()
+            Diagnostics.shared.log("PhotoKit library fingerprint changed; publishing libraryVersion.")
+        } else {
+            Diagnostics.shared.log("PhotoKit library reload completed with unchanged fingerprint; not publishing libraryVersion.")
+        }
+    }
+
+    static func fingerprint(for assets: [PhotoAssetSummary]) -> String {
+        let firstIDs = assets.prefix(20).map(\.id).joined(separator: "|")
+        let lastIDs = assets.suffix(20).map(\.id).joined(separator: "|")
+        let maxModified = assets.compactMap(\.modificationDate).max()?.timeIntervalSince1970 ?? 0
+        return "\(assets.count)#\(Int(maxModified))#\(firstIDs)#\(lastIDs)"
+    }
+
     private static func authorizationState(from status: PHAuthorizationStatus) -> AuthorizationState {
         switch status {
         case .notDetermined: .unknown
@@ -1079,7 +1099,13 @@ private extension UIDisplayGamut {
 extension PhotoLibraryStore: PHPhotoLibraryChangeObserver {
     nonisolated func photoLibraryDidChange(_ changeInstance: PHChange) {
         Task { @MainActor in
-            await reloadAssets()
+            photoLibraryChangeTask?.cancel()
+            photoLibraryChangeTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled else { return }
+                Diagnostics.shared.log("PhotoKit change debounced; reloading assets.")
+                await reloadAssets()
+            }
         }
     }
 }

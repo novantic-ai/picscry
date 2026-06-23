@@ -60,6 +60,7 @@ struct PeopleView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
+                    supplementalStatus
                     Text("Face recognition happens on this device. Photos and face data are not uploaded.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -73,11 +74,27 @@ struct PeopleView: View {
                         Text(summary)
                             .font(.footnote)
                     }
+                    supplementalStatus
                     Text("Face recognition happens on this device. Photos and face data are not uploaded.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var supplementalStatus: some View {
+        if let message = faceRecognitionStore.faceRecognitionHealthMessage {
+            Label(message, systemImage: "exclamationmark.triangle")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        if faceRecognitionStore.hiddenProvisionalUnknownCount > 0 {
+            Text("\(faceRecognitionStore.hiddenProvisionalUnknownCount) single-photo unknown face groups are waiting for more matches.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("\(faceRecognitionStore.hiddenProvisionalUnknownCount) single-photo unknown face groups hidden until Picscry finds more matches.")
         }
     }
 

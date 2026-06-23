@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 @testable import Picscry
 
 final class PicscryTests: XCTestCase {
@@ -198,6 +199,52 @@ final class PicscryTests: XCTestCase {
         XCTAssertEqual(assignment.kind, .newPerson)
     }
 
+    func testMarginPreventsCollapsedEmbeddingAssignment() {
+        var configuration = FaceRecognitionConfiguration()
+        configuration.autoMatchThreshold = 0.90
+        configuration.minimumBestSecondBestMargin = 0.025
+        let engine = FaceClusteringEngine(configuration: configuration)
+        let bestID = UUID()
+        let secondID = UUID()
+        let bestCentroid = [Float(0.997), sqrt(1 - Float(0.997 * 0.997)), 0]
+        let secondCentroid = [Float(0.996), 0, sqrt(1 - Float(0.996 * 0.996))]
+        let assignment = engine.assignment(
+            for: [1, 0, 0],
+            clusters: [
+                FaceCluster(personID: bestID, centroid: bestCentroid, faceCount: 3, name: nil),
+                FaceCluster(personID: secondID, centroid: secondCentroid, faceCount: 3, name: nil)
+            ]
+        )
+
+        if case let .deferredProvisional(bestPersonID, similarity) = assignment.kind {
+            XCTAssertEqual(bestPersonID, bestID)
+            XCTAssertEqual(similarity ?? 0, 0.997, accuracy: 0.0001)
+        } else {
+            XCTFail("Expected deferred provisional assignment for collapsed best/second-best margin.")
+        }
+    }
+
+    func testHealthyMarginCanAssignExistingPerson() {
+        var configuration = FaceRecognitionConfiguration()
+        configuration.autoMatchThreshold = 0.90
+        configuration.minimumBestSecondBestMargin = 0.025
+        let engine = FaceClusteringEngine(configuration: configuration)
+        let bestID = UUID()
+        let assignment = engine.assignment(
+            for: [1, 0, 0],
+            clusters: [
+                FaceCluster(personID: bestID, centroid: [Float(0.94), sqrt(1 - Float(0.94 * 0.94)), 0], faceCount: 3, name: nil),
+                FaceCluster(personID: UUID(), centroid: [Float(0.75), 0, sqrt(1 - Float(0.75 * 0.75))], faceCount: 3, name: nil)
+            ]
+        )
+
+        if case let .existingPerson(assignedID, _) = assignment.kind {
+            XCTAssertEqual(assignedID, bestID)
+        } else {
+            XCTFail("Expected existing person assignment when best match has a healthy margin.")
+        }
+    }
+
     func testUpdatedCentroidNormalizesResult() {
         let engine = FaceClusteringEngine()
         let centroid = engine.updatedCentroid(existing: [1, 0], existingCount: 1, adding: [0, 1])
@@ -215,6 +262,83 @@ final class PicscryTests: XCTestCase {
         ])
 
         XCTAssertGreaterThan(merged[0], merged[1])
+    }
+
+    func testConstrainedGraphClusteringKeepsSamePhotoFacesSeparate() {
+        let engine = FaceClusteringEngine()
+        let firstSamePhoto = UUID()
+        let secondSamePhoto = UUID()
+        let laterMatch = UUID()
+        let nodes = [
+            FaceClusteringObservationNode(id: firstSamePhoto, assetLocalIdentifier: "asset-a", embedding: [1, 0, 0]),
+            FaceClusteringObservationNode(id: secondSamePhoto, assetLocalIdentifier: "asset-a", embedding: [1, 0, 0]),
+            FaceClusteringObservationNode(id: laterMatch, assetLocalIdentifier: "asset-b", embedding: [1, 0, 0])
+        ]
+
+        let components = engine.constrainedComponents(for: nodes, similarityThreshold: 0.92)
+
+        XCTAssertEqual(components.count, 2)
+        XCTAssertFalse(components.contains { component in
+            component.nodeIDs.contains(firstSamePhoto) && component.nodeIDs.contains(secondSamePhoto)
+        })
+        XCTAssertTrue(components.contains { $0.nodeIDs.count == 2 && $0.nodeIDs.contains(laterMatch) })
+    }
+
+    func testIncrementalConstrainedClusteringKeepsSamePhotoFacesSeparate() {
+        let engine = FaceClusteringEngine()
+        let firstSamePhoto = UUID()
+        let secondSamePhoto = UUID()
+        let laterMatch = UUID()
+        let components = engine.constrainedIncrementalComponents(
+            for: [
+                FaceClusteringObservationNode(id: firstSamePhoto, assetLocalIdentifier: "asset-a", embedding: [1, 0, 0]),
+                FaceClusteringObservationNode(id: secondSamePhoto, assetLocalIdentifier: "asset-a", embedding: [1, 0, 0]),
+                FaceClusteringObservationNode(id: laterMatch, assetLocalIdentifier: "asset-b", embedding: [1, 0, 0])
+            ],
+            similarityThreshold: 0.92,
+            singleSampleThreshold: 0.94
+        )
+
+        XCTAssertEqual(components.count, 2)
+        XCTAssertFalse(components.contains { component in
+            component.nodeIDs.contains(firstSamePhoto) && component.nodeIDs.contains(secondSamePhoto)
+        })
+    }
+
+    func testEmbeddingHealthDetectsCollapse() {
+        let monitor = FaceEmbeddingHealthMonitor()
+        let sample = Array(repeating: Float(1) / sqrt(Float(128)), count: 128)
+        for _ in 0..<32 {
+            monitor.add(sample)
+        }
+
+        XCTAssertEqual(monitor.report().status, .suspiciousCollapsed)
+    }
+
+    func testEmbeddingHealthDoesNotFlagDiverseSamplesAsCollapsed() {
+        let monitor = FaceEmbeddingHealthMonitor()
+        for index in 0..<32 {
+            var sample = Array(repeating: Float(0), count: 128)
+            sample[index] = 1
+            monitor.add(sample)
+        }
+
+        XCTAssertNotEqual(monitor.report().status, .suspiciousCollapsed)
+    }
+
+    func testPixelChannelOrderWritesRedToBGRRedChannel() throws {
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 112, height: 112))
+        let image = renderer.image { context in
+            UIColor.red.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 112, height: 112))
+        }
+        let cgImage = try XCTUnwrap(image.cgImage)
+
+        let channels = try FaceEmbeddingService.debugBGRChannelsForFirstPixel(from: cgImage)
+
+        XCTAssertEqual(channels.blue, 0, accuracy: 0.0001)
+        XCTAssertEqual(channels.green, 0, accuracy: 0.0001)
+        XCTAssertEqual(channels.red, 255, accuracy: 0.0001)
     }
 
     func testPeopleSortingNamedFirstThenUnknownByPhotoCount() {

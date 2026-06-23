@@ -11,6 +11,7 @@ struct FaceRecognitionConfiguration {
     var mergeThreshold: Float = 0.82
     var singleSampleAutoMatchThreshold: Float = 0.88
     var disallowMultipleFacesFromSameAssetForSamePerson: Bool = true
+    var minimumBestSecondBestMargin: Float = 0.025
     var representativeThumbnailSize: CGFloat = 256
     var avatarPaddingRatio: CGFloat = 0.85
     var modelInputPaddingRatio: CGFloat = 0.25
@@ -19,6 +20,14 @@ struct FaceRecognitionConfiguration {
     var faceImageRequestTimeoutSeconds: TimeInterval = 45
     var peopleRefreshBatchSize: Int = 50
     var databaseSaveBatchSize: Int = 100
+    var embeddingCalibrationSampleCount: Int = 32
+    var collapsedEmbeddingMedianSimilarityThreshold: Float = 0.90
+    var collapsedEmbeddingMinimumSimilarityThreshold: Float = 0.75
+    var disableAutoClusteringWhenEmbeddingHealthSuspicious = true
+    var clusterRebuildBatchSize: Int = 100
+    var maximumAllPairsClusteringFaceCount: Int = 5_000
+    var graphEdgeSimilarityThreshold: Float = 0.92
+    var graphEdgeSimilarityThresholdForSingleSample: Float = 0.94
 }
 
 struct PersonSummary: Identifiable, Hashable {
@@ -28,6 +37,7 @@ struct PersonSummary: Identifiable, Hashable {
     let photoCount: Int
     let faceCount: Int
     let representativeFaceImageData: Data?
+    let isProvisional: Bool = false
 }
 
 struct PhotoFaceSummary: Identifiable, Hashable {
@@ -61,6 +71,11 @@ enum FaceIndexingState: Equatable {
     case indexing(processed: Int, total: Int)
     case paused
     case failed(String)
+
+    var isIndexing: Bool {
+        if case .indexing = self { return true }
+        return false
+    }
 }
 
 enum RenamePersonResult: Equatable {
