@@ -8,11 +8,6 @@ struct LibraryView: View {
     @State private var isShowingDiagnostics = false
     @State private var mediaFilter: LibraryMediaFilter = .all
 
-    private let columns = Array(
-        repeating: GridItem(.flexible(minimum: 0), spacing: 2),
-        count: 3
-    )
-
     var body: some View {
         NavigationStack {
             content
@@ -56,9 +51,6 @@ struct LibraryView: View {
                     DiagnosticsView()
                 }
         }
-        .task {
-            await photoLibraryStore.prepareLibrary()
-        }
     }
 
     @ViewBuilder
@@ -89,21 +81,8 @@ struct LibraryView: View {
     }
 
     private var visualGrid: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, spacing: 2) {
-                ForEach(filteredAssets) { asset in
-                    Button {
-                        selectedAsset = asset
-                    } label: {
-                        PhotoThumbnailView(asset: asset)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(asset.accessibilitySummary)
-                    .accessibilityHint("Opens this media item")
-                }
-            }
-            .padding(.horizontal, 2)
-            .padding(.vertical, 2)
+        PhotoAssetGridView(assets: filteredAssets) { asset in
+            selectedAsset = asset
         }
         .overlay(alignment: .bottom) {
             if photoLibraryStore.authorizationState == .limited {
@@ -177,4 +156,5 @@ private enum LibraryMediaFilter: String, CaseIterable, Identifiable {
     LibraryView()
         .environment(AuthenticationStore())
         .environment(PhotoLibraryStore())
+        .environment(FaceRecognitionStore())
 }

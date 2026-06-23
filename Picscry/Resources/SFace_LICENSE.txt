@@ -1,0 +1,13 @@
+OpenCV Zoo SFace model attribution
+
+Source:
+https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface
+
+Model:
+face_recognition_sface_2021dec.onnx converted to Core ML as FaceEmbeddingModel.mlmodel.
+
+OpenCV Zoo states that all files in models/face_recognition_sface are licensed
+under the Apache License 2.0.
+
+The model is a MobileFaceNet instance trained with SFace loss and contributed to
+OpenCV Zoo by Yaoyao Zhong.

@@ -25,6 +25,7 @@ final class PhotoLibraryStore: NSObject {
     var isLoading = false
     var errorMessage: String?
     var totalAssetCount = 0
+    var libraryVersion = UUID()
 
     private let imageManager = PHCachingImageManager()
     private var hasRegisteredChangeObserver = false
@@ -87,6 +88,7 @@ final class PhotoLibraryStore: NSObject {
 
             guard result.count > 0 else {
                 assets = []
+                libraryVersion = UUID()
                 isLoading = false
                 Diagnostics.shared.log("Finished PhotoKit fetch with 0 media summaries.")
                 return
@@ -118,6 +120,7 @@ final class PhotoLibraryStore: NSObject {
             if !shouldPublishIncrementally {
                 assets = refreshedAssets
             }
+            libraryVersion = UUID()
             isLoading = false
             Diagnostics.shared.log("Finished PhotoKit fetch with \(assets.count) media summaries.")
         }
@@ -339,6 +342,67 @@ final class PhotoLibraryStore: NSObject {
             return update.image
         }
         return nil
+    }
+
+    func imageForFaceProcessing(
+        for summary: PhotoAssetSummary,
+        maxDimension: CGFloat = 1_600
+    ) async -> FaceProcessingImage? {
+        guard !summary.isVideo, let asset = Self.asset(with: summary.id) else { return nil }
+
+        let options = PHImageRequestOptions()
+        options.isNetworkAccessAllowed = true
+        options.deliveryMode = .highQualityFormat
+        options.resizeMode = .fast
+        options.version = .current
+
+        return await withCheckedContinuation { continuation in
+            PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, orientation, info in
+                if (info?[PHImageCancelledKey] as? Bool) == true {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                if let error = info?[PHImageErrorKey] as? Error {
+                    Diagnostics.shared.log("PhotoKit face processing image request failed: \(error.localizedDescription)")
+                    continuation.resume(returning: nil)
+                    return
+                }
+                guard let data,
+                      let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                let options: [CFString: Any] = [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceThumbnailMaxPixelSize: max(1, Int(maxDimension.rounded())),
+                    kCGImageSourceCreateThumbnailWithTransform: true
+                ]
+                guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                let image = UIImage(cgImage: cgImage, scale: 1, orientation: UIImage.Orientation(orientation))
+                continuation.resume(returning: FaceProcessingImage(
+                    image: image,
+                    cgImage: cgImage,
+                    orientation: orientation,
+                    pixelWidth: cgImage.width,
+                    pixelHeight: cgImage.height
+                ))
+            }
+        }
+    }
+
+    func thumbnail(forAssetID assetID: String, targetSize: CGSize) async -> UIImage? {
+        guard let summary = assets.first(where: { $0.id == assetID }) else { return nil }
+        return await thumbnail(for: summary, targetSize: targetSize)
+    }
+
+    func summaries(withLocalIdentifiers ids: [String]) -> [PhotoAssetSummary] {
+        let requestedIDs = Set(ids)
+        return assets.filter { requestedIDs.contains($0.id) }
     }
 
     func updateDetailImageCache(for summaries: [PhotoAssetSummary], targetSize: CGSize) {

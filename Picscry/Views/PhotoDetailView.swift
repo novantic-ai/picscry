@@ -7,8 +7,11 @@ struct PhotoDetailView: View {
     let initialAsset: PhotoAssetSummary
 
     @Environment(PhotoLibraryStore.self) private var photoLibraryStore
+    @Environment(FaceRecognitionStore.self) private var faceRecognitionStore
     @State private var selectedAssetID: PhotoAssetSummary.ID
     @State private var isShowingMetadata = false
+    @State private var selectedPersonRoute: SelectedPersonRoute?
+    @State private var selectedIncorrectFace: PhotoFaceSummary?
     @Environment(\.dismiss) private var dismiss
 
     init(assets: [PhotoAssetSummary], initialAsset: PhotoAssetSummary) {
@@ -25,7 +28,9 @@ struct PhotoDetailView: View {
                         MediaDetailPage(
                             asset: asset,
                             isActive: asset.id == selectedAssetID,
-                            isShowingMetadata: $isShowingMetadata
+                            isShowingMetadata: $isShowingMetadata,
+                            selectedPersonRoute: $selectedPersonRoute,
+                            selectedIncorrectFace: $selectedIncorrectFace
                         )
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .clipped()
@@ -56,6 +61,13 @@ struct PhotoDetailView: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .navigationDestination(item: $selectedPersonRoute) { route in
+                PersonDetailView(personID: route.id)
+            }
+            .sheet(item: $selectedIncorrectFace) { face in
+                PersonPickerView(face: face)
+                    .environment(faceRecognitionStore)
+            }
         }
     }
 
@@ -85,6 +97,10 @@ struct PhotoDetailView: View {
     }
 }
 
+private struct SelectedPersonRoute: Identifiable, Hashable {
+    let id: UUID
+}
+
 enum PhotoDetailPaging {
     static func preloadRange(centeredOn index: Int?, assetCount: Int, radius: Int = 12) -> Range<Int> {
         guard assetCount > 0 else { return 0..<0 }
@@ -98,15 +114,19 @@ enum PhotoDetailPaging {
 
 private struct MediaDetailPage: View {
     @Environment(PhotoLibraryStore.self) private var photoLibraryStore
+    @Environment(FaceRecognitionStore.self) private var faceRecognitionStore
 
     let asset: PhotoAssetSummary
     let isActive: Bool
     @Binding var isShowingMetadata: Bool
+    @Binding var selectedPersonRoute: SelectedPersonRoute?
+    @Binding var selectedIncorrectFace: PhotoFaceSummary?
 
     @State private var image: UIImage?
     @State private var loadedImageQuality: LoadedImageQuality?
     @State private var player: AVPlayer?
     @State private var metadata: PhotoMetadata = .empty
+    @State private var faces: [PhotoFaceSummary] = []
     @State private var isLoadingMedia = false
     @State private var isLoadingMetadata = false
 
@@ -117,7 +137,7 @@ private struct MediaDetailPage: View {
                     .frame(maxWidth: .infinity, maxHeight: mediaHeight(in: geometry.size))
                     .accessibilityElement(children: .contain)
                     .accessibilityLabel(asset.accessibilitySummary)
-                    .accessibilityHint(isShowingMetadata ? "Metadata is visible below the media." : "Swipe left or right to move through media.")
+                    .accessibilityHint(isShowingMetadata ? "Metadata is visible below the media. Swipe down to hide metadata." : "Swipe up for metadata. Swipe left or right to move through media.")
                     .accessibilityAction(named: isShowingMetadata ? "Hide metadata" : "Show metadata") {
                         isShowingMetadata.toggle()
                     }
@@ -131,6 +151,20 @@ private struct MediaDetailPage: View {
             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .center)
             .background(Color.black)
             .animation(.easeInOut(duration: 0.2), value: isShowingMetadata)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 24, coordinateSpace: .local)
+                    .onEnded { value in
+                        let vertical = value.translation.height
+                        let horizontal = value.translation.width
+                        guard abs(vertical) > abs(horizontal) * 1.4 else { return }
+
+                        if vertical < -40 {
+                            isShowingMetadata = true
+                        } else if vertical > 40 {
+                            isShowingMetadata = false
+                        }
+                    }
+            )
             .task(id: isActive) {
                 guard isActive else {
                     player?.pause()
@@ -141,7 +175,10 @@ private struct MediaDetailPage: View {
             .task(id: isShowingMetadata) {
                 guard isActive, isShowingMetadata else { return }
                 isLoadingMetadata = true
-                metadata = await photoLibraryStore.metadata(for: asset)
+                async let metadataResult = photoLibraryStore.metadata(for: asset)
+                async let faceResult = faceRecognitionStore.faces(for: asset)
+                metadata = await metadataResult
+                faces = await faceResult
                 isLoadingMetadata = false
             }
             .onDisappear { player?.pause() }
@@ -196,6 +233,20 @@ private struct MediaDetailPage: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
+                    if !faces.isEmpty {
+                        Section {
+                            FaceChipRowView(
+                                faces: faces,
+                                onSelect: { face in
+                                    selectedPersonRoute = SelectedPersonRoute(id: face.personID)
+                                },
+                                onCorrect: { face in
+                                    selectedIncorrectFace = face
+                                }
+                            )
+                        }
+                    }
+
                     ForEach(metadata.sections) { section in
                         Section(section.title) {
                             ForEach(section.items) { item in

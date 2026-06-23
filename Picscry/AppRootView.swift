@@ -6,7 +6,7 @@ struct AppRootView: View {
     var body: some View {
         Group {
             if authenticationStore.isSignedIn {
-                LibraryView()
+                MainTabView()
             } else {
                 LoginView()
             }

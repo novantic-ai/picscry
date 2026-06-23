@@ -1,0 +1,123 @@
+import CoreGraphics
+import Foundation
+import ImageIO
+import UIKit
+
+struct FaceRecognitionConfiguration {
+    var faceProcessingMaxDimension: CGFloat = 1_600
+    var minimumFacePixelSize: CGFloat = 48
+    var autoMatchThreshold: Float = 0.72
+    var possibleMatchThreshold: Float = 0.62
+    var mergeThreshold: Float = 0.68
+    var representativeThumbnailSize: CGFloat = 256
+    var indexingBatchSize: Int = 20
+    var embeddingDimension = 128
+}
+
+struct PersonSummary: Identifiable, Hashable {
+    let id: UUID
+    let displayName: String
+    let isUnknown: Bool
+    let photoCount: Int
+    let faceCount: Int
+    let representativeFaceImageData: Data?
+}
+
+struct PhotoFaceSummary: Identifiable, Hashable {
+    let id: UUID
+    let personID: UUID
+    let assetLocalIdentifier: String
+    let displayName: String
+    let isUnknown: Bool
+    let normalizedBoundingBox: CGRect
+    let leftToRightIndex: Int
+    let confidence: Float
+    let representativeFaceImageData: Data?
+    let isManuallyCorrected: Bool
+}
+
+struct FaceObservationInput {
+    let assetLocalIdentifier: String
+    let assetModificationDate: Date?
+    let assetPixelWidth: Int
+    let assetPixelHeight: Int
+    let normalizedBoundingBox: CGRect
+    let leftToRightIndex: Int
+    let detectionConfidence: Float
+    let faceQuality: Float?
+    let embedding: [Float]
+    let faceCropImageData: Data?
+}
+
+enum FaceIndexingState: Equatable {
+    case idle
+    case indexing(processed: Int, total: Int)
+    case paused
+    case failed(String)
+}
+
+enum RenamePersonResult: Equatable {
+    case renamed
+    case needsMergeConfirmation(existingPersonID: UUID, existingName: String)
+}
+
+struct FaceProcessingImage {
+    let image: UIImage
+    let cgImage: CGImage
+    let orientation: CGImagePropertyOrientation
+    let pixelWidth: Int
+    let pixelHeight: Int
+}
+
+extension Array where Element == Float {
+    func l2Normalized() -> [Float] {
+        let magnitude = sqrt(reduce(Float(0)) { $0 + ($1 * $1) })
+        guard magnitude > 0 else { return self }
+        return map { $0 / magnitude }
+    }
+
+    func cosineSimilarity(to other: [Float]) -> Float {
+        guard count == other.count else { return 0 }
+        return zip(self, other).reduce(Float(0)) { $0 + ($1.0 * $1.1) }
+    }
+}
+
+extension Data {
+    init(float32Array values: [Float]) {
+        self = values.withUnsafeBufferPointer { buffer in
+            Data(buffer: UnsafeRawBufferPointer(buffer))
+        }
+    }
+
+    func float32Array() -> [Float] {
+        guard count >= MemoryLayout<Float>.stride else { return [] }
+        let valueCount = count / MemoryLayout<Float>.stride
+        return (0..<valueCount).map { index in
+            let rangeStart = index * MemoryLayout<Float>.stride
+            var value = Float(0)
+            withUnsafeMutableBytes(of: &value) { destination in
+                _ = self[rangeStart..<rangeStart + MemoryLayout<Float>.stride].copyBytes(to: destination)
+            }
+            return value
+        }
+    }
+}
+
+enum PeopleOrdering {
+    static func sorted(_ people: [PersonSummary]) -> [PersonSummary] {
+        let named = people
+            .filter { !$0.isUnknown }
+            .sorted {
+                $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending
+            }
+
+        let unknown = people
+            .filter(\.isUnknown)
+            .sorted {
+                if $0.photoCount != $1.photoCount { return $0.photoCount > $1.photoCount }
+                return $0.faceCount > $1.faceCount
+            }
+
+        return named + unknown
+    }
+}

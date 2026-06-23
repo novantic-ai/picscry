@@ -21,6 +21,22 @@
 		A1000000000000000000000C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001C /* Assets.xcassets */; };
 		A1000000000000000000000E /* Diagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001F /* Diagnostics.swift */; };
 		A1000000000000000000000F /* DiagnosticsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000021 /* DiagnosticsView.swift */; };
+		A10000000000000000000080 /* FaceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000090 /* FaceModels.swift */; };
+		A10000000000000000000081 /* FaceClusteringEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000091 /* FaceClusteringEngine.swift */; };
+		A10000000000000000000082 /* FaceDetectionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000092 /* FaceDetectionService.swift */; };
+		A10000000000000000000083 /* FaceCropService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000093 /* FaceCropService.swift */; };
+		A10000000000000000000084 /* FaceEmbeddingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000094 /* FaceEmbeddingService.swift */; };
+		A10000000000000000000085 /* FaceRecognitionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000095 /* FaceRecognitionStore.swift */; };
+		A10000000000000000000086 /* PhotoAssetGridView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000096 /* PhotoAssetGridView.swift */; };
+		A10000000000000000000087 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000097 /* MainTabView.swift */; };
+		A10000000000000000000088 /* MoreView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000098 /* MoreView.swift */; };
+		A10000000000000000000089 /* PeopleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000099 /* PeopleView.swift */; };
+		A1000000000000000000008A /* PersonDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000009A /* PersonDetailView.swift */; };
+		A1000000000000000000008B /* PersonPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000009B /* PersonPickerView.swift */; };
+		A1000000000000000000008C /* FaceChipRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000009C /* FaceChipRowView.swift */; };
+		A1000000000000000000008D /* FaceAvatarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000009D /* FaceAvatarView.swift */; };
+		A1000000000000000000008E /* FaceEmbeddingModel.mlmodel in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000009E /* FaceEmbeddingModel.mlmodel */; };
+		A1000000000000000000008F /* SFace_LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000009F /* SFace_LICENSE.txt */; };
 		B20000000000000000000001 /* PicscryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000011 /* PicscryTests.swift */; };
 /* End PBXBuildFile section */
 
@@ -42,6 +58,22 @@
 		A1000000000000000000001E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A1000000000000000000001F /* Diagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics.swift; sourceTree = "<group>"; };
 		A10000000000000000000021 /* DiagnosticsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsView.swift; sourceTree = "<group>"; };
+		A10000000000000000000090 /* FaceModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceModels.swift; sourceTree = "<group>"; };
+		A10000000000000000000091 /* FaceClusteringEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceClusteringEngine.swift; sourceTree = "<group>"; };
+		A10000000000000000000092 /* FaceDetectionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceDetectionService.swift; sourceTree = "<group>"; };
+		A10000000000000000000093 /* FaceCropService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceCropService.swift; sourceTree = "<group>"; };
+		A10000000000000000000094 /* FaceEmbeddingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceEmbeddingService.swift; sourceTree = "<group>"; };
+		A10000000000000000000095 /* FaceRecognitionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceRecognitionStore.swift; sourceTree = "<group>"; };
+		A10000000000000000000096 /* PhotoAssetGridView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoAssetGridView.swift; sourceTree = "<group>"; };
+		A10000000000000000000097 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
+		A10000000000000000000098 /* MoreView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoreView.swift; sourceTree = "<group>"; };
+		A10000000000000000000099 /* PeopleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeopleView.swift; sourceTree = "<group>"; };
+		A1000000000000000000009A /* PersonDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonDetailView.swift; sourceTree = "<group>"; };
+		A1000000000000000000009B /* PersonPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonPickerView.swift; sourceTree = "<group>"; };
+		A1000000000000000000009C /* FaceChipRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceChipRowView.swift; sourceTree = "<group>"; };
+		A1000000000000000000009D /* FaceAvatarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceAvatarView.swift; sourceTree = "<group>"; };
+		A1000000000000000000009E /* FaceEmbeddingModel.mlmodel */ = {isa = PBXFileReference; lastKnownFileType = file.mlmodel; path = FaceEmbeddingModel.mlmodel; sourceTree = "<group>"; };
+		A1000000000000000000009F /* SFace_LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = SFace_LICENSE.txt; sourceTree = "<group>"; };
 		B2000000000000000000000D /* PicscryTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PicscryTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B20000000000000000000011 /* PicscryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PicscryTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -83,6 +115,7 @@
 				A10000000000000000000033 /* Models */,
 				A10000000000000000000034 /* Services */,
 				A10000000000000000000035 /* Views */,
+				A10000000000000000000036 /* Resources */,
 				A1000000000000000000001C /* Assets.xcassets */,
 			);
 			path = Picscry;
@@ -102,6 +135,7 @@
 			children = (
 				A10000000000000000000016 /* PhotoAssetSummary.swift */,
 				A10000000000000000000017 /* PhotoMetadata.swift */,
+				A10000000000000000000090 /* FaceModels.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -112,6 +146,11 @@
 				A10000000000000000000013 /* AuthenticationStore.swift */,
 				A10000000000000000000015 /* PhotoLibraryStore.swift */,
 				A1000000000000000000001F /* Diagnostics.swift */,
+				A10000000000000000000091 /* FaceClusteringEngine.swift */,
+				A10000000000000000000092 /* FaceDetectionService.swift */,
+				A10000000000000000000093 /* FaceCropService.swift */,
+				A10000000000000000000094 /* FaceEmbeddingService.swift */,
+				A10000000000000000000095 /* FaceRecognitionStore.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -120,13 +159,30 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000014 /* LoginView.swift */,
+				A10000000000000000000097 /* MainTabView.swift */,
+				A10000000000000000000098 /* MoreView.swift */,
 				A10000000000000000000018 /* LibraryView.swift */,
+				A10000000000000000000096 /* PhotoAssetGridView.swift */,
 				A10000000000000000000019 /* PhotoThumbnailView.swift */,
 				A1000000000000000000001A /* PhotoDetailView.swift */,
+				A10000000000000000000099 /* PeopleView.swift */,
+				A1000000000000000000009A /* PersonDetailView.swift */,
+				A1000000000000000000009B /* PersonPickerView.swift */,
+				A1000000000000000000009C /* FaceChipRowView.swift */,
+				A1000000000000000000009D /* FaceAvatarView.swift */,
 				A1000000000000000000001B /* EmptyStateView.swift */,
 				A10000000000000000000021 /* DiagnosticsView.swift */,
 			);
 			path = Views;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000036 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				A1000000000000000000009E /* FaceEmbeddingModel.mlmodel */,
+				A1000000000000000000009F /* SFace_LICENSE.txt */,
+			);
+			path = Resources;
 			sourceTree = "<group>";
 		};
 		B20000000000000000000031 /* PicscryTests */ = {
@@ -229,6 +285,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1000000000000000000000C /* Assets.xcassets in Resources */,
+				A1000000000000000000008F /* SFace_LICENSE.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -259,6 +316,21 @@
 				A1000000000000000000000B /* EmptyStateView.swift in Sources */,
 				A1000000000000000000000E /* Diagnostics.swift in Sources */,
 				A1000000000000000000000F /* DiagnosticsView.swift in Sources */,
+				A10000000000000000000080 /* FaceModels.swift in Sources */,
+				A10000000000000000000081 /* FaceClusteringEngine.swift in Sources */,
+				A10000000000000000000082 /* FaceDetectionService.swift in Sources */,
+				A10000000000000000000083 /* FaceCropService.swift in Sources */,
+				A10000000000000000000084 /* FaceEmbeddingService.swift in Sources */,
+				A10000000000000000000085 /* FaceRecognitionStore.swift in Sources */,
+				A10000000000000000000086 /* PhotoAssetGridView.swift in Sources */,
+				A10000000000000000000087 /* MainTabView.swift in Sources */,
+				A10000000000000000000088 /* MoreView.swift in Sources */,
+				A10000000000000000000089 /* PeopleView.swift in Sources */,
+				A1000000000000000000008A /* PersonDetailView.swift in Sources */,
+				A1000000000000000000008B /* PersonPickerView.swift in Sources */,
+				A1000000000000000000008C /* FaceChipRowView.swift in Sources */,
+				A1000000000000000000008D /* FaceAvatarView.swift in Sources */,
+				A1000000000000000000008E /* FaceEmbeddingModel.mlmodel in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
