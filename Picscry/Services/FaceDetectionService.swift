@@ -34,7 +34,7 @@ final class FaceDetectionService {
                             DetectedFace(
                                 normalizedBoundingBox: $0.boundingBox,
                                 confidence: $0.confidence,
-                                quality: $0.faceCaptureQuality?.floatValue,
+                                quality: $0.faceCaptureQuality,
                                 landmarks: $0.landmarks
                             )
                         }

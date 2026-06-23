@@ -85,20 +85,24 @@ extension Array where Element == Float {
 extension Data {
     init(float32Array values: [Float]) {
         self = values.withUnsafeBufferPointer { buffer in
-            Data(buffer: UnsafeRawBufferPointer(buffer))
+            guard let baseAddress = buffer.baseAddress else { return Data() }
+            return Data(
+                bytes: baseAddress,
+                count: buffer.count * MemoryLayout<Float>.stride
+            )
         }
     }
 
     func float32Array() -> [Float] {
         guard count >= MemoryLayout<Float>.stride else { return [] }
         let valueCount = count / MemoryLayout<Float>.stride
-        return (0..<valueCount).map { index in
-            let rangeStart = index * MemoryLayout<Float>.stride
-            var value = Float(0)
-            withUnsafeMutableBytes(of: &value) { destination in
-                _ = self[rangeStart..<rangeStart + MemoryLayout<Float>.stride].copyBytes(to: destination)
+        return withUnsafeBytes { rawBuffer -> [Float] in
+            (0..<valueCount).map { index in
+                rawBuffer.load(
+                    fromByteOffset: index * MemoryLayout<Float>.stride,
+                    as: Float.self
+                )
             }
-            return value
         }
     }
 }

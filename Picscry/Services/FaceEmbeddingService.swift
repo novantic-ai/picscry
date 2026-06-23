@@ -28,7 +28,7 @@ actor FaceEmbeddingService {
         }
 
         let input = try Self.multiArrayInput(from: faceImage)
-        let output = try model.prediction(from: FaceEmbeddingFeatureProvider(input: input))
+        let output = try await model.prediction(from: FaceEmbeddingFeatureProvider(input: input))
         guard let embedding = output.featureValue(for: "fc1")?.multiArrayValue else {
             throw FaceEmbeddingServiceError.outputUnavailable
         }
