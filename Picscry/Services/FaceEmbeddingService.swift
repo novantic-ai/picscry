@@ -7,9 +7,14 @@ import UIKit
 actor FaceEmbeddingService {
     private static let inputSize = 112
     private let model: MLModel?
+    private let modelInputShape: [Int]
     private var didLogInputLayout = false
+    private var didLogModelDescription = false
     private var didLogModelOutput = false
     private var didLogEmbeddingStats = false
+    private var loggedInputStatsCount = 0
+    private var debugExportCount = 0
+    private var rawFeatureSamples: [[Float]] = []
 
     init(configuration: FaceRecognitionConfiguration = FaceRecognitionConfiguration()) {
         let modelConfiguration = MLModelConfiguration()
@@ -19,23 +24,35 @@ actor FaceEmbeddingService {
         } else {
             model = nil
         }
+        modelInputShape = Self.inputShape(from: model) ?? [3, Self.inputSize, Self.inputSize]
     }
 
     var isModelAvailable: Bool {
         model != nil
     }
 
-    func embedding(for faceImage: CGImage) async throws -> [Float] {
+    func embedding(for faceImage: CGImage, debugIdentifier: String? = nil) async throws -> [Float] {
         guard let model else {
             throw FaceEmbeddingServiceError.modelUnavailable
         }
 
-        let input = try Self.multiArrayInput(from: faceImage)
+        if !didLogModelDescription {
+            didLogModelDescription = true
+            Diagnostics.shared.log("Face model input descriptions: \(Self.featureDescriptionText(model.modelDescription.inputDescriptionsByName)).")
+            Diagnostics.shared.log("Face model output descriptions: \(Self.featureDescriptionText(model.modelDescription.outputDescriptionsByName)).")
+        }
+
+        let input = try Self.multiArrayInput(from: faceImage, shape: modelInputShape)
         if !didLogInputLayout {
             didLogInputLayout = true
-            Diagnostics.shared.log("Face embedding input layout: NCHW RGB, value range 0...255, OpenCV-equivalent swapRB=true path.")
+            Diagnostics.shared.log("Face embedding input layout: \(input.layoutDescription), RGB, value range 0...255, OpenCV-equivalent swapRB=true path.")
         }
-        let output = try await model.prediction(from: FaceEmbeddingFeatureProvider(input: input))
+        if loggedInputStatsCount < 10 {
+            loggedInputStatsCount += 1
+            Diagnostics.shared.log("Face embedding input stats: rMean \(input.stats.red.mean), gMean \(input.stats.green.mean), bMean \(input.stats.blue.mean), rMin \(input.stats.red.min), rMax \(input.stats.red.max), gMin \(input.stats.green.min), gMax \(input.stats.green.max), bMin \(input.stats.blue.min), bMax \(input.stats.blue.max), blackPixelRatio \(input.stats.blackPixelRatio).")
+        }
+
+        let output = try await model.prediction(from: FaceEmbeddingFeatureProvider(input: input.array))
         if !didLogModelOutput {
             didLogModelOutput = true
             Diagnostics.shared.log("Face embedding model output feature names: \(output.featureNames.sorted().joined(separator: ", ")).")
@@ -53,10 +70,22 @@ actor FaceEmbeddingService {
             Diagnostics.shared.log("Face embedding output shape \(embedding.shape), strides \(embedding.strides), dataType \(embedding.dataType).")
             Diagnostics.shared.log("Face embedding raw stats: count \(raw.count), min \(minValue), max \(maxValue), mean \(mean), norm \(norm).")
         }
-        return raw.l2Normalized()
+        recordRawFeatureSample(raw)
+
+        let normalized = raw.l2Normalized()
+        exportDebugArtifactsIfNeeded(
+            faceImage: faceImage,
+            rawEmbedding: raw,
+            normalizedEmbedding: normalized,
+            debugIdentifier: debugIdentifier
+        )
+        return normalized
     }
 
-    private static func multiArrayInput(from image: CGImage) throws -> MLMultiArray {
+    private static func multiArrayInput(
+        from image: CGImage,
+        shape: [Int] = [3, inputSize, inputSize]
+    ) throws -> FaceEmbeddingInput {
         let size = inputSize
         let bytesPerPixel = 4
         let bytesPerRow = size * bytesPerPixel
@@ -78,11 +107,10 @@ actor FaceEmbeddingService {
         context.interpolationQuality = .high
         context.draw(image, in: CGRect(x: 0, y: 0, width: size, height: size))
 
-        let array = try MLMultiArray(shape: [3, NSNumber(value: size), NSNumber(value: size)], dataType: .double)
-        let channelStride = array.strides[0].intValue
-        let rowStride = array.strides[1].intValue
-        let columnStride = array.strides[2].intValue
+        let normalizedShape = normalizedInputShape(shape)
+        let array = try MLMultiArray(shape: normalizedShape.map(NSNumber.init(value:)), dataType: .double)
         let pointer = array.dataPointer.bindMemory(to: Double.self, capacity: array.count)
+        var stats = FaceEmbeddingInputStats()
 
         for y in 0..<size {
             for x in 0..<size {
@@ -90,28 +118,42 @@ actor FaceEmbeddingService {
                 let red = Double(pixels[offset])
                 let green = Double(pixels[offset + 1])
                 let blue = Double(pixels[offset + 2])
+                stats.add(red: red, green: green, blue: blue)
 
                 // OpenCV SFace uses blobFromImage(..., swapRB: true) on BGR OpenCV images,
-                // so the model receives NCHW RGB values in the 0...255 range. The ONNX/Core ML
-                // model contains its own early normalization layers.
-                pointer[(0 * channelStride) + (y * rowStride) + (x * columnStride)] = red
-                pointer[(1 * channelStride) + (y * rowStride) + (x * columnStride)] = green
-                pointer[(2 * channelStride) + (y * rowStride) + (x * columnStride)] = blue
+                // so the model receives RGB channel values in the 0...255 range.
+                writeModelInput(red: red, green: green, blue: blue, x: x, y: y, into: array, pointer: pointer)
             }
         }
 
-        return array
+        return FaceEmbeddingInput(
+            array: array,
+            stats: stats.finalized(),
+            layoutDescription: normalizedShape.count == 4 ? "NCHW batch \(normalizedShape)" : "CHW \(normalizedShape)"
+        )
     }
 
-    static func debugRGBChannelsForFirstPixel(from image: CGImage) throws -> (red: Double, green: Double, blue: Double) {
-        let array = try multiArrayInput(from: image)
+    nonisolated static func debugRGBChannelsForFirstPixel(
+        from image: CGImage,
+        shape: [Int] = [3, inputSize, inputSize]
+    ) throws -> (red: Double, green: Double, blue: Double) {
+        let input = try multiArrayInput(from: image, shape: shape)
+        let array = input.array
         let pointer = array.dataPointer.bindMemory(to: Double.self, capacity: array.count)
-        let channelStride = array.strides[0].intValue
+        let shape = array.shape.map(\.intValue)
+        let strides = array.strides.map(\.intValue)
+        let channelDimension = shape.count == 4 ? 1 : 0
+        let channelStride = strides[channelDimension]
+        let baseOffset = shape.count == 4 ? 0 * strides[0] : 0
         return (
-            red: pointer[0],
-            green: pointer[channelStride],
-            blue: pointer[channelStride * 2]
+            red: pointer[baseOffset],
+            green: pointer[baseOffset + channelStride],
+            blue: pointer[baseOffset + (channelStride * 2)]
         )
+    }
+
+    nonisolated static func debugInputShape(from image: CGImage, shape: [Int]) throws -> [Int] {
+        try multiArrayInput(from: image, shape: shape).array.shape.map(\.intValue)
     }
 
     private static var rgbaBitmapInfo: UInt32 {
@@ -159,6 +201,202 @@ actor FaceEmbeddingService {
         appendOffsets(dimension: 0, baseOffset: 0)
         return offsets
     }
+
+    private static func inputShape(from model: MLModel?) -> [Int]? {
+        guard let constraint = model?.modelDescription.inputDescriptionsByName["data"]?.multiArrayConstraint else {
+            return nil
+        }
+        return normalizedInputShape(constraint.shape.map(\.intValue))
+    }
+
+    private static func normalizedInputShape(_ shape: [Int]) -> [Int] {
+        if shape == [1, 3, inputSize, inputSize] || shape == [3, inputSize, inputSize] {
+            return shape
+        }
+        if shape.count == 4, shape[1] == 3, shape[2] == inputSize, shape[3] == inputSize {
+            return [max(shape[0], 1), 3, inputSize, inputSize]
+        }
+        return [3, inputSize, inputSize]
+    }
+
+    private static func writeModelInput(
+        red: Double,
+        green: Double,
+        blue: Double,
+        x: Int,
+        y: Int,
+        into array: MLMultiArray,
+        pointer: UnsafeMutablePointer<Double>
+    ) {
+        let shape = array.shape.map(\.intValue)
+        let strides = array.strides.map(\.intValue)
+        if shape.count == 4 {
+            let base = 0 * strides[0]
+            pointer[base + (0 * strides[1]) + (y * strides[2]) + (x * strides[3])] = red
+            pointer[base + (1 * strides[1]) + (y * strides[2]) + (x * strides[3])] = green
+            pointer[base + (2 * strides[1]) + (y * strides[2]) + (x * strides[3])] = blue
+        } else {
+            pointer[(0 * strides[0]) + (y * strides[1]) + (x * strides[2])] = red
+            pointer[(1 * strides[0]) + (y * strides[1]) + (x * strides[2])] = green
+            pointer[(2 * strides[0]) + (y * strides[1]) + (x * strides[2])] = blue
+        }
+    }
+
+    private static func featureDescriptionText(_ descriptions: [String: MLFeatureDescription]) -> String {
+        descriptions
+            .keys
+            .sorted()
+            .map { name in
+                guard let description = descriptions[name] else { return name }
+                let shape = description.multiArrayConstraint?.shape.map(\.intValue) ?? []
+                let dataType = description.multiArrayConstraint?.dataType
+                return "\(name): type \(description.type), shape \(shape), dataType \(String(describing: dataType))"
+            }
+            .joined(separator: "; ")
+    }
+
+    private func recordRawFeatureSample(_ raw: [Float]) {
+        guard rawFeatureSamples.count < 32, !raw.isEmpty else { return }
+        rawFeatureSamples.append(raw)
+        guard rawFeatureSamples.count == 32 else { return }
+
+        var stds: [Float] = []
+        stds.reserveCapacity(raw.count)
+        for dimension in raw.indices {
+            let values = rawFeatureSamples.map { $0[dimension] }
+            let mean = values.reduce(Float(0), +) / Float(values.count)
+            let variance = values.reduce(Float(0)) { $0 + (($1 - mean) * ($1 - mean)) } / Float(values.count)
+            stds.append(sqrt(variance))
+        }
+        stds.sort()
+
+        var distances: [Float] = []
+        for leftIndex in rawFeatureSamples.indices {
+            for rightIndex in rawFeatureSamples.indices where rightIndex > leftIndex {
+                let squared = zip(rawFeatureSamples[leftIndex], rawFeatureSamples[rightIndex]).reduce(Float(0)) {
+                    let delta = $1.0 - $1.1
+                    return $0 + (delta * delta)
+                }
+                distances.append(sqrt(squared))
+            }
+        }
+        distances.sort()
+
+        Diagnostics.shared.log("Face embedding vector diversity: dimensionStd min \(stds.first ?? 0), median \(stds[stds.count / 2]), max \(stds.last ?? 0).")
+        Diagnostics.shared.log("Face raw feature pairwise L2: min \(distances.first ?? 0), median \(distances[distances.count / 2]), max \(distances.last ?? 0).")
+    }
+
+    private func exportDebugArtifactsIfNeeded(
+        faceImage: CGImage,
+        rawEmbedding: [Float],
+        normalizedEmbedding: [Float],
+        debugIdentifier: String?
+    ) {
+        guard debugExportCount < 20 else { return }
+        debugExportCount += 1
+        let safeIdentifier = (debugIdentifier ?? "face").map { character in
+            character.isLetter || character.isNumber ? character : "_"
+        }.reduce(into: "") { $0.append($1) }
+        let prefix = String(format: "aligned_%03d_%@", debugExportCount, safeIdentifier)
+        guard let directory = Self.debugDirectoryURL() else { return }
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let imageURL = directory.appendingPathComponent("\(prefix).png")
+        if let data = UIImage(cgImage: faceImage).pngData() {
+            try? data.write(to: imageURL, options: .atomic)
+        }
+
+        let vectorURL = directory.appendingPathComponent("\(prefix).json")
+        let payload = FaceEmbeddingDebugPayload(
+            rawEmbedding: rawEmbedding,
+            normalizedEmbedding: normalizedEmbedding
+        )
+        if let data = try? JSONEncoder().encode(payload) {
+            try? data.write(to: vectorURL, options: .atomic)
+        }
+        Diagnostics.shared.log("Face debug aligned crop saved: \(imageURL.path)")
+        Diagnostics.shared.log("Face debug embedding saved: \(vectorURL.path)")
+    }
+
+    private static func debugDirectoryURL() -> URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent("Picscry", isDirectory: true)
+            .appendingPathComponent("FaceEmbeddingDebug", isDirectory: true)
+    }
+}
+
+private struct FaceEmbeddingInput {
+    let array: MLMultiArray
+    let stats: FinalFaceEmbeddingInputStats
+    let layoutDescription: String
+}
+
+private struct FaceEmbeddingInputStats {
+    private(set) var red = RunningPixelStats()
+    private(set) var green = RunningPixelStats()
+    private(set) var blue = RunningPixelStats()
+    private var blackPixelCount = 0
+    private var pixelCount = 0
+
+    mutating func add(red: Double, green: Double, blue: Double) {
+        self.red.add(red)
+        self.green.add(green)
+        self.blue.add(blue)
+        if red < 2, green < 2, blue < 2 {
+            blackPixelCount += 1
+        }
+        pixelCount += 1
+    }
+
+    func finalized() -> FinalFaceEmbeddingInputStats {
+        FinalFaceEmbeddingInputStats(
+            red: red.finalized(),
+            green: green.finalized(),
+            blue: blue.finalized(),
+            blackPixelRatio: pixelCount == 0 ? 0 : Double(blackPixelCount) / Double(pixelCount)
+        )
+    }
+}
+
+private struct RunningPixelStats {
+    private var count = 0
+    private var sum = 0.0
+    private var minimum = Double.greatestFiniteMagnitude
+    private var maximum = -Double.greatestFiniteMagnitude
+
+    mutating func add(_ value: Double) {
+        count += 1
+        sum += value
+        minimum = min(minimum, value)
+        maximum = max(maximum, value)
+    }
+
+    func finalized() -> FinalChannelStats {
+        FinalChannelStats(
+            min: count == 0 ? 0 : minimum,
+            max: count == 0 ? 0 : maximum,
+            mean: count == 0 ? 0 : sum / Double(count)
+        )
+    }
+}
+
+private struct FinalFaceEmbeddingInputStats {
+    let red: FinalChannelStats
+    let green: FinalChannelStats
+    let blue: FinalChannelStats
+    let blackPixelRatio: Double
+}
+
+private struct FinalChannelStats {
+    let min: Double
+    let max: Double
+    let mean: Double
+}
+
+private struct FaceEmbeddingDebugPayload: Encodable {
+    let rawEmbedding: [Float]
+    let normalizedEmbedding: [Float]
 }
 
 private enum FaceEmbeddingServiceError: LocalizedError {

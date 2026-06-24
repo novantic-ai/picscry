@@ -358,6 +358,21 @@ final class PicscryTests: XCTestCase {
         XCTAssertEqual(channels.blue, 255, accuracy: 0.0001)
     }
 
+    func testFaceEmbeddingInputSupportsFourDimensionalModelShape() throws {
+        let cgImage = try XCTUnwrap(makeSolidColorImage(red: 1, green: 0, blue: 0))
+
+        let shape = try FaceEmbeddingService.debugInputShape(from: cgImage, shape: [1, 3, 112, 112])
+        let channels = try FaceEmbeddingService.debugRGBChannelsForFirstPixel(
+            from: cgImage,
+            shape: [1, 3, 112, 112]
+        )
+
+        XCTAssertEqual(shape, [1, 3, 112, 112])
+        XCTAssertEqual(channels.red, 255, accuracy: 0.0001)
+        XCTAssertEqual(channels.green, 0, accuracy: 0.0001)
+        XCTAssertEqual(channels.blue, 0, accuracy: 0.0001)
+    }
+
     func testPeopleSortingNamedFirstThenUnknownByPhotoCount() {
         let alpha = PersonSummary(id: UUID(), displayName: "Ana", isUnknown: false, photoCount: 1, faceCount: 1, representativeFaceImageData: nil)
         let zed = PersonSummary(id: UUID(), displayName: "Zed", isUnknown: false, photoCount: 1, faceCount: 1, representativeFaceImageData: nil)

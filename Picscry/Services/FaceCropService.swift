@@ -11,8 +11,8 @@ struct FaceCropResult {
 }
 
 enum FaceAlignmentMethod: String, Codable {
-    case opencvFivePoint
-    case eyeMouthFallback
+    case opencvFivePointSVD
+    case eyeMouthSimilarity
     case rectangleFallback
 }
 
@@ -143,7 +143,7 @@ final class FaceCropService {
         detectedFace: DetectedFace,
         imageSize: CGSize
     ) -> (image: CGImage, quality: Float, method: FaceAlignmentMethod)? {
-        if let fivePointCrop = opencvFivePointAlignedModelCrop(
+        if let fivePointCrop = opencvFivePointSVDAlignedModelCrop(
             from: cgImage,
             detectedFace: detectedFace,
             imageSize: imageSize
@@ -222,10 +222,10 @@ final class FaceCropService {
         let transformedMouth = mouthCenter.applying(transform)
         let mouthError = hypot(transformedMouth.x - targetMouthCenter.x, transformedMouth.y - targetMouthCenter.y)
         let quality = Float(max(0, min(1, 1 - (mouthError / 56))))
-        return (rendered, quality, .eyeMouthFallback)
+        return (rendered, quality, .eyeMouthSimilarity)
     }
 
-    private static func opencvFivePointAlignedModelCrop(
+    private static func opencvFivePointSVDAlignedModelCrop(
         from cgImage: CGImage,
         detectedFace: DetectedFace,
         imageSize: CGSize
@@ -240,23 +240,23 @@ final class FaceCropService {
         }
 
         let candidates = fivePointLandmarks.candidateSourceOrders()
-        var bestCandidate: (transform: CGAffineTransform, error: CGFloat)?
+        var bestCandidate: (transform: CGAffineTransform, error: CGFloat, label: String)?
 
-        for sourcePoints in candidates {
+        for candidate in candidates {
             guard let transform = sfaceSimilarityTransform(
-                source: sourcePoints,
+                source: candidate.points,
                 destination: opencvSFaceDestinationLandmarks
             ) else {
                 continue
             }
 
             let error = meanReprojectionError(
-                source: sourcePoints,
+                source: candidate.points,
                 destination: opencvSFaceDestinationLandmarks,
                 transform: transform
             )
             if bestCandidate == nil || error < bestCandidate!.error {
-                bestCandidate = (transform, error)
+                bestCandidate = (transform, error, candidate.label)
             }
         }
 
@@ -266,7 +266,8 @@ final class FaceCropService {
         }
 
         let quality = Float(max(0, min(1, 1 - (bestCandidate.error / 56))))
-        return (rendered, quality, .opencvFivePoint)
+        Diagnostics.shared.log("Face alignment mapping selected: \(bestCandidate.label), reprojectionError \(bestCandidate.error).")
+        return (rendered, quality, .opencvFivePointSVD)
     }
 
     private static func renderAlignedImage(_ cgImage: CGImage, transform: CGAffineTransform, size: Int) -> CGImage? {
@@ -485,12 +486,12 @@ private struct FaceLandmarkFivePointSet {
     let mouthA: CGPoint
     let mouthB: CGPoint
 
-    func candidateSourceOrders() -> [[CGPoint]] {
+    func candidateSourceOrders() -> [(label: String, points: [CGPoint])] {
         [
-            [eyeA, eyeB, noseTip, mouthA, mouthB],
-            [eyeB, eyeA, noseTip, mouthA, mouthB],
-            [eyeA, eyeB, noseTip, mouthB, mouthA],
-            [eyeB, eyeA, noseTip, mouthB, mouthA]
+            ("candidateA", [eyeA, eyeB, noseTip, mouthA, mouthB]),
+            ("candidateB", [eyeB, eyeA, noseTip, mouthA, mouthB]),
+            ("candidateC", [eyeA, eyeB, noseTip, mouthB, mouthA]),
+            ("candidateD", [eyeB, eyeA, noseTip, mouthB, mouthA])
         ]
     }
 }

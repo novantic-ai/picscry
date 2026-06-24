@@ -345,7 +345,10 @@ final class FaceRecognitionStore {
             }
 
             let embeddingStartedAt = Date()
-            let embedding = try await embeddingService.embedding(for: crop.modelInputImage)
+            let embedding = try await embeddingService.embedding(
+                for: crop.modelInputImage,
+                debugIdentifier: "\(asset.id)_face\(index + 1)"
+            )
             Diagnostics.shared.log("Face crop diagnostics asset \(asset.id), face \(index + 1): modelCrop \(crop.modelInputImage.width)x\(crop.modelInputImage.height), alignment \(crop.alignmentMethod.rawValue), quality \(crop.alignmentQuality), confidence \(detectedFace.confidence).")
             Diagnostics.shared.log("Face indexing asset \(asset.id): face \(index + 1)/\(detectedFaces.count) embedded in \(Self.durationText(since: embeddingStartedAt)); total face time \(Self.durationText(since: faceStartedAt)), confidence \(detectedFace.confidence), alignment \(crop.alignmentMethod.rawValue), alignment quality \(crop.alignmentQuality).")
             observations.append(FaceObservationInput(
@@ -706,7 +709,7 @@ final class FaceRecognitionStore {
             guard snapshot.schemaVersion == FaceDatabaseSchema.currentVersion else {
                 Diagnostics.shared.log("Discarding old face database schema \(snapshot.schemaVersion); current schema is \(FaceDatabaseSchema.currentVersion). Reindex required.")
                 resetPersistedState(at: url)
-                lastIndexingSummary = "Face recognition preprocessing was improved. Picscry will reindex faces on this device."
+                lastIndexingSummary = "Face recognition alignment and embedding diagnostics were improved. Picscry will reindex faces on this device."
                 return
             }
 
@@ -779,7 +782,7 @@ final class FaceRecognitionStore {
 }
 
 private enum FaceDatabaseSchema {
-    static let currentVersion = 5
+    static let currentVersion = 6
 }
 
 private struct FaceDatabaseSnapshot: Codable {
