@@ -273,12 +273,12 @@ private enum CRC32 {
 private extension Data {
     mutating func appendLittleEndian(_ value: UInt16) {
         var littleEndian = value.littleEndian
-        withUnsafeBytes(of: &littleEndian) { append(contentsOf: $0) }
+        Swift.withUnsafeBytes(of: &littleEndian) { append(contentsOf: $0) }
     }
 
     mutating func appendLittleEndian(_ value: UInt32) {
         var littleEndian = value.littleEndian
-        withUnsafeBytes(of: &littleEndian) { append(contentsOf: $0) }
+        Swift.withUnsafeBytes(of: &littleEndian) { append(contentsOf: $0) }
     }
 }
 
