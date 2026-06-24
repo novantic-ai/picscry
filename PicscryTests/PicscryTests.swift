@@ -328,19 +328,34 @@ final class PicscryTests: XCTestCase {
         XCTAssertNotEqual(monitor.report().status, .suspiciousCollapsed)
     }
 
-    func testPixelChannelOrderWritesRedToBGRRedChannel() throws {
-        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 112, height: 112))
-        let image = renderer.image { context in
-            UIColor.red.setFill()
-            context.fill(CGRect(x: 0, y: 0, width: 112, height: 112))
-        }
-        let cgImage = try XCTUnwrap(image.cgImage)
+    func testFaceEmbeddingInputUsesRGBChannelOrderForRedImage() throws {
+        let cgImage = try XCTUnwrap(makeSolidColorImage(red: 1, green: 0, blue: 0))
 
-        let channels = try FaceEmbeddingService.debugBGRChannelsForFirstPixel(from: cgImage)
+        let channels = try FaceEmbeddingService.debugRGBChannelsForFirstPixel(from: cgImage)
 
-        XCTAssertEqual(channels.blue, 0, accuracy: 0.0001)
-        XCTAssertEqual(channels.green, 0, accuracy: 0.0001)
         XCTAssertEqual(channels.red, 255, accuracy: 0.0001)
+        XCTAssertEqual(channels.green, 0, accuracy: 0.0001)
+        XCTAssertEqual(channels.blue, 0, accuracy: 0.0001)
+    }
+
+    func testFaceEmbeddingInputUsesRGBChannelOrderForGreenImage() throws {
+        let cgImage = try XCTUnwrap(makeSolidColorImage(red: 0, green: 1, blue: 0))
+
+        let channels = try FaceEmbeddingService.debugRGBChannelsForFirstPixel(from: cgImage)
+
+        XCTAssertEqual(channels.red, 0, accuracy: 0.0001)
+        XCTAssertEqual(channels.green, 255, accuracy: 0.0001)
+        XCTAssertEqual(channels.blue, 0, accuracy: 0.0001)
+    }
+
+    func testFaceEmbeddingInputUsesRGBChannelOrderForBlueImage() throws {
+        let cgImage = try XCTUnwrap(makeSolidColorImage(red: 0, green: 0, blue: 1))
+
+        let channels = try FaceEmbeddingService.debugRGBChannelsForFirstPixel(from: cgImage)
+
+        XCTAssertEqual(channels.red, 0, accuracy: 0.0001)
+        XCTAssertEqual(channels.green, 0, accuracy: 0.0001)
+        XCTAssertEqual(channels.blue, 255, accuracy: 0.0001)
     }
 
     func testPeopleSortingNamedFirstThenUnknownByPhotoCount() {
@@ -394,5 +409,35 @@ final class PicscryTests: XCTestCase {
         XCTAssertGreaterThan(rect.width, 0)
         XCTAssertGreaterThanOrEqual(rect.minX, 0)
         XCTAssertGreaterThanOrEqual(rect.minY, 0)
+    }
+
+    private func makeSolidColorImage(red: CGFloat, green: CGFloat, blue: CGFloat, size: Int = 112) -> CGImage? {
+        let bytesPerPixel = 4
+        let bytesPerRow = size * bytesPerPixel
+        var pixels = [UInt8](repeating: 255, count: size * bytesPerRow)
+        for y in 0..<size {
+            for x in 0..<size {
+                let offset = (y * bytesPerRow) + (x * bytesPerPixel)
+                pixels[offset] = UInt8(red * 255)
+                pixels[offset + 1] = UInt8(green * 255)
+                pixels[offset + 2] = UInt8(blue * 255)
+                pixels[offset + 3] = 255
+            }
+        }
+
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                data: &pixels,
+                width: size,
+                height: size,
+                bitsPerComponent: 8,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+              ) else {
+            return nil
+        }
+
+        return context.makeImage()
     }
 }

@@ -7,6 +7,13 @@ struct FaceCropResult {
     let avatarImageData: Data?
     let qualityScore: Float
     let alignmentQuality: Float
+    let alignmentMethod: FaceAlignmentMethod
+}
+
+enum FaceAlignmentMethod: String, Codable {
+    case opencvFivePoint
+    case eyeMouthFallback
+    case rectangleFallback
 }
 
 final class FaceCropService {
@@ -34,6 +41,7 @@ final class FaceCropService {
             imageSize: imageSize
         )
         let modelCrop = alignedCrop?.image ?? Self.resizedSquareCrop(initialModelCrop, size: 112) ?? initialModelCrop
+        let alignmentMethod = alignedCrop?.method ?? .rectangleFallback
 
         let avatarRect = Self.squareAvatarRect(
             around: pixelRect,
@@ -53,7 +61,8 @@ final class FaceCropService {
                 size: configuration.representativeThumbnailSize
             ),
             qualityScore: quality,
-            alignmentQuality: alignedCrop?.quality ?? 0
+            alignmentQuality: alignedCrop?.quality ?? 0,
+            alignmentMethod: alignmentMethod
         )
     }
 
@@ -133,7 +142,26 @@ final class FaceCropService {
         from cgImage: CGImage,
         detectedFace: DetectedFace,
         imageSize: CGSize
-    ) -> (image: CGImage, quality: Float)? {
+    ) -> (image: CGImage, quality: Float, method: FaceAlignmentMethod)? {
+        if let fivePointCrop = opencvFivePointAlignedModelCrop(
+            from: cgImage,
+            detectedFace: detectedFace,
+            imageSize: imageSize
+        ) {
+            return fivePointCrop
+        }
+        return eyeMouthAlignedModelCrop(
+            from: cgImage,
+            detectedFace: detectedFace,
+            imageSize: imageSize
+        )
+    }
+
+    private static func eyeMouthAlignedModelCrop(
+        from cgImage: CGImage,
+        detectedFace: DetectedFace,
+        imageSize: CGSize
+    ) -> (image: CGImage, quality: Float, method: FaceAlignmentMethod)? {
         guard let landmarks = detectedFace.landmarks,
               let leftEye = landmarks.leftEye,
               let rightEye = landmarks.rightEye,
@@ -194,7 +222,75 @@ final class FaceCropService {
         let transformedMouth = mouthCenter.applying(transform)
         let mouthError = hypot(transformedMouth.x - targetMouthCenter.x, transformedMouth.y - targetMouthCenter.y)
         let quality = Float(max(0, min(1, 1 - (mouthError / 56))))
-        return (rendered, quality)
+        return (rendered, quality, .eyeMouthFallback)
+    }
+
+    private static func opencvFivePointAlignedModelCrop(
+        from cgImage: CGImage,
+        detectedFace: DetectedFace,
+        imageSize: CGSize
+    ) -> (image: CGImage, quality: Float, method: FaceAlignmentMethod)? {
+        guard let landmarks = detectedFace.landmarks,
+              let fivePointLandmarks = sfaceFiveLandmarks(
+                from: landmarks,
+                faceBox: detectedFace.normalizedBoundingBox,
+                imageSize: imageSize
+              ) else {
+            return nil
+        }
+
+        let candidates = fivePointLandmarks.candidateSourceOrders()
+        var bestCandidate: (transform: CGAffineTransform, error: CGFloat)?
+
+        for sourcePoints in candidates {
+            guard let transform = sfaceSimilarityTransform(
+                source: sourcePoints,
+                destination: opencvSFaceDestinationLandmarks
+            ) else {
+                continue
+            }
+
+            let error = meanReprojectionError(
+                source: sourcePoints,
+                destination: opencvSFaceDestinationLandmarks,
+                transform: transform
+            )
+            if bestCandidate == nil || error < bestCandidate!.error {
+                bestCandidate = (transform, error)
+            }
+        }
+
+        guard let bestCandidate else { return nil }
+        guard let rendered = renderAlignedImage(cgImage, transform: bestCandidate.transform, size: 112) else {
+            return nil
+        }
+
+        let quality = Float(max(0, min(1, 1 - (bestCandidate.error / 56))))
+        return (rendered, quality, .opencvFivePoint)
+    }
+
+    private static func renderAlignedImage(_ cgImage: CGImage, transform: CGAffineTransform, size: Int) -> CGImage? {
+        let bytesPerRow = size * 4
+        var pixels = [UInt8](repeating: 0, count: size * bytesPerRow)
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                data: &pixels,
+                width: size,
+                height: size,
+                bitsPerComponent: 8,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+              ) else {
+            return nil
+        }
+
+        context.interpolationQuality = .high
+        context.setFillColor(UIColor.black.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: size, height: size))
+        context.concatenate(transform)
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height))
+        return context.makeImage()
     }
 
     private static func resizedSquareCrop(_ crop: CGImage, size: Int) -> CGImage? {
@@ -232,6 +328,60 @@ final class FaceCropService {
         return nil
     }
 
+    private static func sfaceFiveLandmarks(
+        from landmarks: VNFaceLandmarks2D,
+        faceBox: CGRect,
+        imageSize: CGSize
+    ) -> FaceLandmarkFivePointSet? {
+        guard let visionLeftEye = landmarks.leftEye,
+              let visionRightEye = landmarks.rightEye,
+              let eyeA = landmarkCenter(visionRightEye, faceBox: faceBox, imageSize: imageSize),
+              let eyeB = landmarkCenter(visionLeftEye, faceBox: faceBox, imageSize: imageSize),
+              let noseTip = noseTip(from: landmarks, faceBox: faceBox, imageSize: imageSize),
+              let mouthCorners = mouthCorners(from: landmarks, faceBox: faceBox, imageSize: imageSize) else {
+            return nil
+        }
+
+        return FaceLandmarkFivePointSet(
+            eyeA: eyeA,
+            eyeB: eyeB,
+            noseTip: noseTip,
+            mouthA: mouthCorners.left,
+            mouthB: mouthCorners.right
+        )
+    }
+
+    private static func noseTip(
+        from landmarks: VNFaceLandmarks2D,
+        faceBox: CGRect,
+        imageSize: CGSize
+    ) -> CGPoint? {
+        if let noseCrest = landmarks.noseCrest,
+           let bottom = landmarkPoints(noseCrest, faceBox: faceBox, imageSize: imageSize).max(by: { $0.y < $1.y }) {
+            return bottom
+        }
+        if let nose = landmarks.nose,
+           let bottom = landmarkPoints(nose, faceBox: faceBox, imageSize: imageSize).max(by: { $0.y < $1.y }) {
+            return bottom
+        }
+        return nil
+    }
+
+    private static func mouthCorners(
+        from landmarks: VNFaceLandmarks2D,
+        faceBox: CGRect,
+        imageSize: CGSize
+    ) -> (left: CGPoint, right: CGPoint)? {
+        let region = landmarks.outerLips ?? landmarks.innerLips
+        guard let region else { return nil }
+        let points = landmarkPoints(region, faceBox: faceBox, imageSize: imageSize)
+        guard let left = points.min(by: { $0.x < $1.x }),
+              let right = points.max(by: { $0.x < $1.x }) else {
+            return nil
+        }
+        return (left, right)
+    }
+
     private static func landmarkCenter(
         _ region: VNFaceLandmarkRegion2D,
         faceBox: CGRect,
@@ -250,5 +400,103 @@ final class FaceCropService {
             x: (faceBox.minX + (average.x * faceBox.width)) * imageSize.width,
             y: (1 - (faceBox.minY + (average.y * faceBox.height))) * imageSize.height
         )
+    }
+
+    private static func landmarkPoints(
+        _ region: VNFaceLandmarkRegion2D,
+        faceBox: CGRect,
+        imageSize: CGSize
+    ) -> [CGPoint] {
+        region.normalizedPoints.map { point in
+            CGPoint(
+                x: (faceBox.minX + (CGFloat(point.x) * faceBox.width)) * imageSize.width,
+                y: (1 - (faceBox.minY + (CGFloat(point.y) * faceBox.height))) * imageSize.height
+            )
+        }
+    }
+
+    private static let opencvSFaceDestinationLandmarks: [CGPoint] = [
+        CGPoint(x: 38.2946, y: 51.6963),
+        CGPoint(x: 73.5318, y: 51.5014),
+        CGPoint(x: 56.0252, y: 71.7366),
+        CGPoint(x: 41.5493, y: 92.3655),
+        CGPoint(x: 70.7299, y: 92.2041)
+    ]
+
+    private static func sfaceSimilarityTransform(
+        source: [CGPoint],
+        destination: [CGPoint]
+    ) -> CGAffineTransform? {
+        guard source.count == destination.count, source.count >= 2 else { return nil }
+
+        let count = CGFloat(source.count)
+        let sourceMean = source.reduce(CGPoint.zero) { partial, point in
+            CGPoint(x: partial.x + point.x, y: partial.y + point.y)
+        }.scaled(by: 1 / count)
+        let destinationMean = destination.reduce(CGPoint.zero) { partial, point in
+            CGPoint(x: partial.x + point.x, y: partial.y + point.y)
+        }.scaled(by: 1 / count)
+
+        var denominator: CGFloat = 0
+        var aNumerator: CGFloat = 0
+        var bNumerator: CGFloat = 0
+
+        for (sourcePoint, destinationPoint) in zip(source, destination) {
+            let sx = sourcePoint.x - sourceMean.x
+            let sy = sourcePoint.y - sourceMean.y
+            let dx = destinationPoint.x - destinationMean.x
+            let dy = destinationPoint.y - destinationMean.y
+
+            denominator += (sx * sx) + (sy * sy)
+            aNumerator += (dx * sx) + (dy * sy)
+            bNumerator += (dy * sx) - (dx * sy)
+        }
+
+        guard denominator.isFinite, denominator > .ulpOfOne else { return nil }
+        let a = aNumerator / denominator
+        let b = bNumerator / denominator
+        guard a.isFinite, b.isFinite else { return nil }
+
+        let tx = destinationMean.x - (a * sourceMean.x) + (b * sourceMean.y)
+        let ty = destinationMean.y - (b * sourceMean.x) - (a * sourceMean.y)
+        guard tx.isFinite, ty.isFinite else { return nil }
+
+        return CGAffineTransform(a: a, b: b, c: -b, d: a, tx: tx, ty: ty)
+    }
+
+    private static func meanReprojectionError(
+        source: [CGPoint],
+        destination: [CGPoint],
+        transform: CGAffineTransform
+    ) -> CGFloat {
+        guard source.count == destination.count, !source.isEmpty else { return .greatestFiniteMagnitude }
+        let total = zip(source, destination).reduce(CGFloat(0)) { partial, pair in
+            let transformed = pair.0.applying(transform)
+            return partial + hypot(transformed.x - pair.1.x, transformed.y - pair.1.y)
+        }
+        return total / CGFloat(source.count)
+    }
+}
+
+private struct FaceLandmarkFivePointSet {
+    let eyeA: CGPoint
+    let eyeB: CGPoint
+    let noseTip: CGPoint
+    let mouthA: CGPoint
+    let mouthB: CGPoint
+
+    func candidateSourceOrders() -> [[CGPoint]] {
+        [
+            [eyeA, eyeB, noseTip, mouthA, mouthB],
+            [eyeB, eyeA, noseTip, mouthA, mouthB],
+            [eyeA, eyeB, noseTip, mouthB, mouthA],
+            [eyeB, eyeA, noseTip, mouthB, mouthA]
+        ]
+    }
+}
+
+private extension CGPoint {
+    func scaled(by scale: CGFloat) -> CGPoint {
+        CGPoint(x: x * scale, y: y * scale)
     }
 }

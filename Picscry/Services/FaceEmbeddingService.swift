@@ -7,6 +7,7 @@ import UIKit
 actor FaceEmbeddingService {
     private static let inputSize = 112
     private let model: MLModel?
+    private var didLogInputLayout = false
     private var didLogModelOutput = false
     private var didLogEmbeddingStats = false
 
@@ -30,6 +31,10 @@ actor FaceEmbeddingService {
         }
 
         let input = try Self.multiArrayInput(from: faceImage)
+        if !didLogInputLayout {
+            didLogInputLayout = true
+            Diagnostics.shared.log("Face embedding input layout: NCHW RGB, value range 0...255, OpenCV-equivalent swapRB=true path.")
+        }
         let output = try await model.prediction(from: FaceEmbeddingFeatureProvider(input: input))
         if !didLogModelOutput {
             didLogModelOutput = true
@@ -45,6 +50,7 @@ actor FaceEmbeddingService {
             let minValue = raw.min() ?? 0
             let maxValue = raw.max() ?? 0
             let mean = raw.isEmpty ? 0 : raw.reduce(Float(0), +) / Float(raw.count)
+            Diagnostics.shared.log("Face embedding output shape \(embedding.shape), strides \(embedding.strides), dataType \(embedding.dataType).")
             Diagnostics.shared.log("Face embedding raw stats: count \(raw.count), min \(minValue), max \(maxValue), mean \(mean), norm \(norm).")
         }
         return raw.l2Normalized()
@@ -85,25 +91,26 @@ actor FaceEmbeddingService {
                 let green = Double(pixels[offset + 1])
                 let blue = Double(pixels[offset + 2])
 
-                // OpenCV SFace expects NCHW BGR input in the 0...255 range. The model's
-                // first layers apply (value - 127.5) * 0.0078125.
-                pointer[(0 * channelStride) + (y * rowStride) + (x * columnStride)] = blue
+                // OpenCV SFace uses blobFromImage(..., swapRB: true) on BGR OpenCV images,
+                // so the model receives NCHW RGB values in the 0...255 range. The ONNX/Core ML
+                // model contains its own early normalization layers.
+                pointer[(0 * channelStride) + (y * rowStride) + (x * columnStride)] = red
                 pointer[(1 * channelStride) + (y * rowStride) + (x * columnStride)] = green
-                pointer[(2 * channelStride) + (y * rowStride) + (x * columnStride)] = red
+                pointer[(2 * channelStride) + (y * rowStride) + (x * columnStride)] = blue
             }
         }
 
         return array
     }
 
-    static func debugBGRChannelsForFirstPixel(from image: CGImage) throws -> (blue: Double, green: Double, red: Double) {
+    static func debugRGBChannelsForFirstPixel(from image: CGImage) throws -> (red: Double, green: Double, blue: Double) {
         let array = try multiArrayInput(from: image)
         let pointer = array.dataPointer.bindMemory(to: Double.self, capacity: array.count)
         let channelStride = array.strides[0].intValue
         return (
-            blue: pointer[0],
+            red: pointer[0],
             green: pointer[channelStride],
-            red: pointer[channelStride * 2]
+            blue: pointer[channelStride * 2]
         )
     }
 
@@ -112,16 +119,45 @@ actor FaceEmbeddingService {
     }
 
     private static func floatArray(from multiArray: MLMultiArray) -> [Float] {
+        let shape = multiArray.shape.map(\.intValue)
+        let strides = multiArray.strides.map(\.intValue)
+        guard !shape.isEmpty, shape.allSatisfy({ $0 > 0 }) else { return [] }
+
+        let offsets = flattenedOffsets(shape: shape, strides: strides)
         switch multiArray.dataType {
         case .double:
             let pointer = multiArray.dataPointer.bindMemory(to: Double.self, capacity: multiArray.count)
-            return (0..<multiArray.count).map { Float(pointer[$0]) }
+            return offsets.map { Float(pointer[$0]) }
         case .float32:
             let pointer = multiArray.dataPointer.bindMemory(to: Float.self, capacity: multiArray.count)
-            return (0..<multiArray.count).map { pointer[$0] }
+            return offsets.map { pointer[$0] }
         default:
             return []
         }
+    }
+
+    private static func flattenedOffsets(shape: [Int], strides: [Int]) -> [Int] {
+        guard shape.count == strides.count else { return Array(0..<shape.reduce(1, *)) }
+
+        var offsets: [Int] = []
+        offsets.reserveCapacity(shape.reduce(1, *))
+
+        func appendOffsets(dimension: Int, baseOffset: Int) {
+            if dimension == shape.count {
+                offsets.append(baseOffset)
+                return
+            }
+
+            for index in 0..<shape[dimension] {
+                appendOffsets(
+                    dimension: dimension + 1,
+                    baseOffset: baseOffset + (index * strides[dimension])
+                )
+            }
+        }
+
+        appendOffsets(dimension: 0, baseOffset: 0)
+        return offsets
     }
 }
 
