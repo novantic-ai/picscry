@@ -88,7 +88,7 @@ enum FaceEmbeddingDebugExportService {
 
         return FaceEmbeddingDebugManifest(
             appVersion: "\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown") (\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"))",
-            schemaVersion: 6,
+            schemaVersion: 7,
             modelInputDescription: "data shape [3,112,112]",
             modelOutputDescription: "fc1 shape [128]",
             inputLayout: "CHW [3,112,112] RGB 0...255",

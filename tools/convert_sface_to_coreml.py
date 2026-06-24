@@ -67,6 +67,9 @@ def main():
 
         if node.op_type == "Conv":
             weights = array(initializers, node.input[1])
+            # ONNX Conv stores kernels as OIHW. Core ML neural-network builder
+            # expects HWIO, including depthwise/grouped convolutions.
+            coreml_weights = np.transpose(weights, (2, 3, 1, 0))
             pads = node_attrs.get("pads", [0, 0, 0, 0])
             strides = node_attrs.get("strides", [1, 1])
             dilations = node_attrs.get("dilations", [1, 1])
@@ -81,7 +84,7 @@ def main():
                 stride_width=int(strides[1]),
                 border_mode="valid",
                 groups=groups,
-                W=weights,
+                W=coreml_weights,
                 b=None,
                 has_bias=False,
                 input_name=input_name,

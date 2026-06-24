@@ -714,7 +714,7 @@ final class FaceRecognitionStore {
             guard snapshot.schemaVersion == FaceDatabaseSchema.currentVersion else {
                 Diagnostics.shared.log("Discarding old face database schema \(snapshot.schemaVersion); current schema is \(FaceDatabaseSchema.currentVersion). Reindex required.")
                 resetPersistedState(at: url)
-                lastIndexingSummary = "Face recognition alignment and embedding diagnostics were improved. Picscry will reindex faces on this device."
+                lastIndexingSummary = "Face recognition model conversion was corrected. Picscry will reindex faces on this device."
                 return
             }
 
@@ -787,7 +787,7 @@ final class FaceRecognitionStore {
 }
 
 private enum FaceDatabaseSchema {
-    static let currentVersion = 6
+    static let currentVersion = 7
 }
 
 private struct FaceDatabaseSnapshot: Codable {
