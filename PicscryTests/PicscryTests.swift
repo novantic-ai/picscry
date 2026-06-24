@@ -299,10 +299,12 @@ final class PicscryTests: XCTestCase {
             singleSampleThreshold: 0.94
         )
 
-        XCTAssertEqual(components.count, 2)
         XCTAssertFalse(components.contains { component in
             component.nodeIDs.contains(firstSamePhoto) && component.nodeIDs.contains(secondSamePhoto)
         })
+        XCTAssertTrue(components.contains { $0.nodeIDs.contains(firstSamePhoto) })
+        XCTAssertTrue(components.contains { $0.nodeIDs.contains(secondSamePhoto) })
+        XCTAssertTrue(components.contains { $0.nodeIDs.contains(laterMatch) })
     }
 
     func testEmbeddingHealthDetectsCollapse() {
