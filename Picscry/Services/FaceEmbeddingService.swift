@@ -308,6 +308,7 @@ actor FaceEmbeddingService {
 
         let vectorURL = directory.appendingPathComponent("\(prefix).json")
         let payload = FaceEmbeddingDebugPayload(
+            debugIdentifier: debugIdentifier,
             rawEmbedding: rawEmbedding,
             normalizedEmbedding: normalizedEmbedding
         )
@@ -395,6 +396,7 @@ private struct FinalChannelStats {
 }
 
 private struct FaceEmbeddingDebugPayload: Encodable {
+    let debugIdentifier: String?
     let rawEmbedding: [Float]
     let normalizedEmbedding: [Float]
 }

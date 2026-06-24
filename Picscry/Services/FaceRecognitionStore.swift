@@ -31,6 +31,7 @@ final class FaceRecognitionStore {
     private var activeIndexingAssetFingerprint: String?
     private var activeIndexingRunID: UUID?
     private var lastLoggedEmbeddingHealthSampleCount = 0
+    private var didLogSuspiciousEmbeddingHealthThisRun = false
 
     init(configuration: FaceRecognitionConfiguration = FaceRecognitionConfiguration()) {
         self.configuration = configuration
@@ -122,6 +123,7 @@ final class FaceRecognitionStore {
         let runID = UUID()
         activeIndexingRunID = runID
         activeIndexingAssetFingerprint = currentFingerprint
+        didLogSuspiciousEmbeddingHealthThisRun = false
         Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face indexing run started (\(reason)): \(pending.count) pending photos out of \(assets.count) image assets. Existing index records: \(indexRecords.count), people: \(persons.count), faces: \(facesByID.count).")
         scheduleBackgroundIndexing(reason: "indexing started from \(reason)")
 
@@ -430,7 +432,10 @@ final class FaceRecognitionStore {
                 persons[personID] = StoredPerson(id: personID, name: nil, isProvisional: true)
                 if shouldDisableAutoClustering {
                     faceRecognitionHealthMessage = "Face recognition embeddings look too similar. Picscry paused auto-grouping to avoid incorrect people."
-                    Diagnostics.shared.log("Face embedding health suspicious: \(healthReport.status), sampleCount \(healthReport.sampleCount), median \(healthReport.medianSimilarity?.description ?? "unknown"), min \(healthReport.minSimilarity?.description ?? "unknown"), max \(healthReport.maxSimilarity?.description ?? "unknown"); disabling auto-clustering.")
+                    if !didLogSuspiciousEmbeddingHealthThisRun {
+                        didLogSuspiciousEmbeddingHealthThisRun = true
+                        Diagnostics.shared.log("Face embedding health suspicious: \(healthReport.status), sampleCount \(healthReport.sampleCount), median \(healthReport.medianSimilarity?.description ?? "unknown"), min \(healthReport.minSimilarity?.description ?? "unknown"), max \(healthReport.maxSimilarity?.description ?? "unknown"); disabling auto-clustering.")
+                    }
                 } else {
                     Diagnostics.shared.log("Face clustering deferred provisional for asset \(asset.id), face \(observation.leftToRightIndex + 1): insufficient best-vs-second-best margin.")
                 }

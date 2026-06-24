@@ -27,6 +27,7 @@
 		A10000000000000000000083 /* FaceCropService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000093 /* FaceCropService.swift */; };
 		A10000000000000000000084 /* FaceEmbeddingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000094 /* FaceEmbeddingService.swift */; };
 		A10000000000000000000085 /* FaceRecognitionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000095 /* FaceRecognitionStore.swift */; };
+		A100000000000000000000A1 /* FaceEmbeddingDebugExportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A0 /* FaceEmbeddingDebugExportService.swift */; };
 		A10000000000000000000086 /* PhotoAssetGridView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000096 /* PhotoAssetGridView.swift */; };
 		A10000000000000000000087 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000097 /* MainTabView.swift */; };
 		A10000000000000000000088 /* MoreView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000098 /* MoreView.swift */; };
@@ -64,6 +65,7 @@
 		A10000000000000000000093 /* FaceCropService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceCropService.swift; sourceTree = "<group>"; };
 		A10000000000000000000094 /* FaceEmbeddingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceEmbeddingService.swift; sourceTree = "<group>"; };
 		A10000000000000000000095 /* FaceRecognitionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceRecognitionStore.swift; sourceTree = "<group>"; };
+		A100000000000000000000A0 /* FaceEmbeddingDebugExportService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceEmbeddingDebugExportService.swift; sourceTree = "<group>"; };
 		A10000000000000000000096 /* PhotoAssetGridView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoAssetGridView.swift; sourceTree = "<group>"; };
 		A10000000000000000000097 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
 		A10000000000000000000098 /* MoreView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoreView.swift; sourceTree = "<group>"; };
@@ -150,6 +152,7 @@
 				A10000000000000000000092 /* FaceDetectionService.swift */,
 				A10000000000000000000093 /* FaceCropService.swift */,
 				A10000000000000000000094 /* FaceEmbeddingService.swift */,
+				A100000000000000000000A0 /* FaceEmbeddingDebugExportService.swift */,
 				A10000000000000000000095 /* FaceRecognitionStore.swift */,
 			);
 			path = Services;
@@ -321,6 +324,7 @@
 				A10000000000000000000082 /* FaceDetectionService.swift in Sources */,
 				A10000000000000000000083 /* FaceCropService.swift in Sources */,
 				A10000000000000000000084 /* FaceEmbeddingService.swift in Sources */,
+				A100000000000000000000A1 /* FaceEmbeddingDebugExportService.swift in Sources */,
 				A10000000000000000000085 /* FaceRecognitionStore.swift in Sources */,
 				A10000000000000000000086 /* PhotoAssetGridView.swift in Sources */,
 				A10000000000000000000087 /* MainTabView.swift in Sources */,
