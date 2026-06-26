@@ -52,13 +52,25 @@ enum FaceEmbeddingDebugExportService {
             )
         }
 
-        let manifest = makeManifest(for: debugFiles)
-        let manifestData = try JSONEncoder.pretty.encode(manifest)
-        archive.addFile(path: "FaceEmbeddingDebug/manifest.json", data: manifestData)
-
         let diagnosticsData = (try? Data(contentsOf: Diagnostics.shared.exportURL())) ??
             Data(Diagnostics.shared.recentText().utf8)
         archive.addFile(path: "FaceEmbeddingDebug/diagnostics.log", data: diagnosticsData)
+
+        let clusteringDiagnosticsFileName: String?
+        if let clusteringDiagnosticsURL,
+           let clusteringDiagnosticsData = try? Data(contentsOf: clusteringDiagnosticsURL) {
+            clusteringDiagnosticsFileName = clusteringDiagnosticsURL.lastPathComponent
+            archive.addFile(
+                path: "FaceEmbeddingDebug/\(clusteringDiagnosticsURL.lastPathComponent)",
+                data: clusteringDiagnosticsData
+            )
+        } else {
+            clusteringDiagnosticsFileName = nil
+        }
+
+        let manifest = makeManifest(for: debugFiles, clusteringDiagnosticsFileName: clusteringDiagnosticsFileName)
+        let manifestData = try JSONEncoder.pretty.encode(manifest)
+        archive.addFile(path: "FaceEmbeddingDebug/manifest.json", data: manifestData)
 
         guard archive.write(to: archiveURL) else {
             throw FaceEmbeddingDebugExportError.archiveCreationFailed
@@ -67,7 +79,10 @@ enum FaceEmbeddingDebugExportService {
         return archiveURL
     }
 
-    private static func makeManifest(for files: [URL]) -> FaceEmbeddingDebugManifest {
+    private static func makeManifest(
+        for files: [URL],
+        clusteringDiagnosticsFileName: String?
+    ) -> FaceEmbeddingDebugManifest {
         let items = files
             .filter { $0.pathExtension.lowercased() == "png" }
             .enumerated()
@@ -88,10 +103,11 @@ enum FaceEmbeddingDebugExportService {
 
         return FaceEmbeddingDebugManifest(
             appVersion: "\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown") (\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"))",
-            schemaVersion: 7,
+            schemaVersion: 8,
             modelInputDescription: "data shape [3,112,112]",
             modelOutputDescription: "fc1 shape [128]",
             inputLayout: "CHW [3,112,112] RGB 0...255",
+            clusteringDiagnosticsFile: clusteringDiagnosticsFileName,
             items: items
         )
     }
@@ -108,6 +124,13 @@ enum FaceEmbeddingDebugExportService {
             throw FaceEmbeddingDebugExportError.archiveCreationFailed
         }
         return baseURL.appendingPathComponent("PicscryExports", isDirectory: true)
+    }
+
+    private static var clusteringDiagnosticsURL: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent("FaceRecognition", isDirectory: true)
+            .appendingPathComponent("clustering-diagnostics.json", isDirectory: false)
     }
 
     private static func debugIdentifier(from url: URL) -> String? {
@@ -153,6 +176,7 @@ private struct FaceEmbeddingDebugManifest: Encodable {
     let modelInputDescription: String
     let modelOutputDescription: String
     let inputLayout: String
+    let clusteringDiagnosticsFile: String?
     let items: [Item]
 }
 

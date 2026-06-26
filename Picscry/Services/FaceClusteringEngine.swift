@@ -87,6 +87,7 @@ final class FaceClusteringEngine {
         let secondBest = ranked.dropFirst().first
         if let secondBest,
            best.similarity >= configuration.possibleMatchThreshold,
+           secondBest.similarity >= configuration.possibleMatchThreshold,
            best.similarity - secondBest.similarity < configuration.minimumBestSecondBestMargin {
             return FaceClusterAssignment(kind: .deferredProvisional(
                 bestPersonID: best.personID,
@@ -134,6 +135,23 @@ final class FaceClusteringEngine {
 
         guard totalCount > 0 else { return [] }
         return accumulator.map { $0 / Float(totalCount) }.l2Normalized()
+    }
+
+    func canAutomaticallyMerge(left: FaceCluster, right: FaceCluster, similarity: Float) -> Bool {
+        let leftName = left.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rightName = right.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let leftName, !leftName.isEmpty,
+           let rightName, !rightName.isEmpty,
+           leftName.localizedCaseInsensitiveCompare(rightName) != .orderedSame {
+            return false
+        }
+
+        if (leftName?.isEmpty == false) != (rightName?.isEmpty == false) {
+            return similarity >= configuration.autoMatchThreshold
+        }
+
+        return similarity >= configuration.mergeThreshold
     }
 
     func constrainedComponents(
@@ -195,7 +213,7 @@ final class FaceClusteringEngine {
             let secondSimilarity = ranked.dropFirst().first?.similarity
             if let best = ranked.first,
                best.similarity >= threshold,
-               secondSimilarity.map({ best.similarity - $0 >= configuration.minimumBestSecondBestMargin }) ?? true {
+               isHealthyMargin(bestSimilarity: best.similarity, secondSimilarity: secondSimilarity) {
                 let componentIndex = best.componentIndex
                 components[componentIndex].nodeIndexes.append(index)
                 components[componentIndex].assetIDs.insert(node.assetLocalIdentifier)
@@ -216,6 +234,74 @@ final class FaceClusteringEngine {
         return components.map { component in
             FaceClusteringComponent(nodeIDs: component.nodeIndexes.map { nodes[$0].id })
         }
+    }
+
+    func mergedConstrainedComponents(
+        from initialComponents: [FaceClusteringComponent],
+        nodes: [FaceClusteringObservationNode],
+        mergeThreshold: Float
+    ) -> [FaceClusteringComponent] {
+        guard !initialComponents.isEmpty else { return [] }
+        let nodeIndexByID = Dictionary(uniqueKeysWithValues: nodes.enumerated().map { ($0.element.id, $0.offset) })
+
+        struct WorkingComponent {
+            var nodeIndexes: [Int]
+            var assetIDs: Set<String>
+            var centroid: [Float]
+        }
+
+        var components = initialComponents.compactMap { component -> WorkingComponent? in
+            let indexes = component.nodeIDs.compactMap { nodeIndexByID[$0] }
+            guard !indexes.isEmpty else { return nil }
+            let clusters = indexes.map { (centroid: nodes[$0].embedding, count: 1) }
+            return WorkingComponent(
+                nodeIndexes: indexes,
+                assetIDs: Set(indexes.map { nodes[$0].assetLocalIdentifier }),
+                centroid: mergedCentroid(clusters: clusters)
+            )
+        }
+
+        var didMerge = true
+        while didMerge {
+            didMerge = false
+            var bestPair: (left: Int, right: Int, similarity: Float)?
+
+            for leftIndex in components.indices {
+                for rightIndex in components.indices where rightIndex > leftIndex {
+                    guard components[leftIndex].assetIDs.isDisjoint(with: components[rightIndex].assetIDs) else {
+                        continue
+                    }
+
+                    let similarity = components[leftIndex].centroid.cosineSimilarity(to: components[rightIndex].centroid)
+                    guard similarity >= mergeThreshold else { continue }
+                    if bestPair == nil || similarity > bestPair!.similarity {
+                        bestPair = (leftIndex, rightIndex, similarity)
+                    }
+                }
+            }
+
+            if let bestPair {
+                let left = bestPair.left
+                let right = bestPair.right
+                let mergedIndexes = components[left].nodeIndexes + components[right].nodeIndexes
+                let mergedClusters = mergedIndexes.map { (centroid: nodes[$0].embedding, count: 1) }
+                components[left].nodeIndexes = mergedIndexes
+                components[left].assetIDs.formUnion(components[right].assetIDs)
+                components[left].centroid = mergedCentroid(clusters: mergedClusters)
+                components.remove(at: right)
+                didMerge = true
+            }
+        }
+
+        return components.map { component in
+            FaceClusteringComponent(nodeIDs: component.nodeIndexes.sorted().map { nodes[$0].id })
+        }
+    }
+
+    private func isHealthyMargin(bestSimilarity: Float, secondSimilarity: Float?) -> Bool {
+        guard let secondSimilarity else { return true }
+        guard secondSimilarity >= configuration.possibleMatchThreshold else { return true }
+        return bestSimilarity - secondSimilarity >= configuration.minimumBestSecondBestMargin
     }
 }
 

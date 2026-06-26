@@ -4,14 +4,16 @@ import ImageIO
 import UIKit
 
 struct FaceRecognitionConfiguration {
+    static let tunedDefault = FaceRecognitionConfiguration()
+
     var faceProcessingMaxDimension: CGFloat = 1_600
     var minimumFacePixelSize: CGFloat = 48
-    var autoMatchThreshold: Float = 0.84
-    var possibleMatchThreshold: Float = 0.76
-    var mergeThreshold: Float = 0.82
-    var singleSampleAutoMatchThreshold: Float = 0.88
+    var autoMatchThreshold: Float = 0.78
+    var possibleMatchThreshold: Float = 0.68
+    var mergeThreshold: Float = 0.79
+    var singleSampleAutoMatchThreshold: Float = 0.80
     var disallowMultipleFacesFromSameAssetForSamePerson: Bool = true
-    var minimumBestSecondBestMargin: Float = 0.025
+    var minimumBestSecondBestMargin: Float = 0.015
     var representativeThumbnailSize: CGFloat = 256
     var avatarPaddingRatio: CGFloat = 0.85
     var modelInputPaddingRatio: CGFloat = 0.25
@@ -26,8 +28,8 @@ struct FaceRecognitionConfiguration {
     var disableAutoClusteringWhenEmbeddingHealthSuspicious = true
     var clusterRebuildBatchSize: Int = 100
     var maximumAllPairsClusteringFaceCount: Int = 5_000
-    var graphEdgeSimilarityThreshold: Float = 0.92
-    var graphEdgeSimilarityThresholdForSingleSample: Float = 0.94
+    var graphEdgeSimilarityThreshold: Float = 0.80
+    var graphEdgeSimilarityThresholdForSingleSample: Float = 0.82
 }
 
 struct PersonSummary: Identifiable, Hashable {

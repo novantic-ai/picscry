@@ -32,6 +32,7 @@ final class FaceRecognitionStore {
     private var activeIndexingRunID: UUID?
     private var lastLoggedEmbeddingHealthSampleCount = 0
     private var didLogSuspiciousEmbeddingHealthThisRun = false
+    private var assignmentDecisionCounts = FaceAssignmentDecisionCounts()
 
     init(configuration: FaceRecognitionConfiguration = FaceRecognitionConfiguration()) {
         self.configuration = configuration
@@ -124,6 +125,7 @@ final class FaceRecognitionStore {
         activeIndexingRunID = runID
         activeIndexingAssetFingerprint = currentFingerprint
         didLogSuspiciousEmbeddingHealthThisRun = false
+        assignmentDecisionCounts = FaceAssignmentDecisionCounts()
         Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face indexing run started (\(reason)): \(pending.count) pending photos out of \(assets.count) image assets. Existing index records: \(indexRecords.count), people: \(persons.count), faces: \(facesByID.count).")
         scheduleBackgroundIndexing(reason: "indexing started from \(reason)")
 
@@ -420,13 +422,20 @@ final class FaceRecognitionStore {
 
             switch assignment.kind {
             case let .existingPerson(existingID, _):
+                assignmentDecisionCounts.existingPerson += 1
                 personID = existingID
                 isProvisional = false
             case .newPerson, .ambiguous:
+                if case .newPerson = assignment.kind {
+                    assignmentDecisionCounts.newPerson += 1
+                } else {
+                    assignmentDecisionCounts.ambiguous += 1
+                }
                 personID = UUID()
                 isProvisional = observations.count > 1
                 persons[personID] = StoredPerson(id: personID, name: nil, isProvisional: isProvisional)
             case .deferredProvisional:
+                assignmentDecisionCounts.deferredProvisional += 1
                 personID = UUID()
                 isProvisional = true
                 persons[personID] = StoredPerson(id: personID, name: nil, isProvisional: true)
@@ -597,32 +606,41 @@ final class FaceRecognitionStore {
             (healthReport.status == .suspiciousCollapsed || healthReport.status == .suspiciousNoisy)
         let oldAutomaticPersonIDs = Set(candidates.map(\.personID))
         let components: [FaceClusteringComponent]
+        let nodes = candidates.map {
+            FaceClusteringObservationNode(
+                id: $0.id,
+                assetLocalIdentifier: $0.assetLocalIdentifier,
+                embedding: $0.embedding
+            )
+        }
 
         if shouldDisableAutoClustering {
             components = candidates.map { FaceClusteringComponent(nodeIDs: [$0.id]) }
             faceRecognitionHealthMessage = "Face recognition embeddings look too similar. Picscry paused auto-grouping to avoid incorrect people."
             Diagnostics.shared.log("Face clustering rebuild skipped grouping (\(reason)): embedding health \(healthReport.status), observations \(candidates.count).")
         } else {
-            let nodes = candidates.map {
-                FaceClusteringObservationNode(
-                    id: $0.id,
-                    assetLocalIdentifier: $0.assetLocalIdentifier,
-                    embedding: $0.embedding
-                )
-            }
+            let initialComponents: [FaceClusteringComponent]
             if nodes.count <= configuration.maximumAllPairsClusteringFaceCount {
-                components = clusteringEngine.constrainedComponents(
+                initialComponents = clusteringEngine.constrainedComponents(
                     for: nodes,
                     similarityThreshold: configuration.graphEdgeSimilarityThreshold
                 )
                 Diagnostics.shared.log("Face clustering rebuild using all-pairs graph (\(reason)): observations \(nodes.count), threshold \(configuration.graphEdgeSimilarityThreshold).")
             } else {
-                components = clusteringEngine.constrainedIncrementalComponents(
+                initialComponents = clusteringEngine.constrainedIncrementalComponents(
                     for: nodes,
                     similarityThreshold: configuration.graphEdgeSimilarityThreshold,
                     singleSampleThreshold: configuration.graphEdgeSimilarityThresholdForSingleSample
                 )
                 Diagnostics.shared.log("Face clustering rebuild using incremental constrained fallback (\(reason)): observations \(nodes.count), threshold \(configuration.graphEdgeSimilarityThreshold).")
+            }
+            components = clusteringEngine.mergedConstrainedComponents(
+                from: initialComponents,
+                nodes: nodes,
+                mergeThreshold: configuration.mergeThreshold
+            )
+            if components.count != initialComponents.count {
+                Diagnostics.shared.log("Face clustering merge pass (\(reason)): reduced clusters from \(initialComponents.count) to \(components.count), threshold \(configuration.mergeThreshold).")
             }
         }
 
@@ -655,7 +673,132 @@ final class FaceRecognitionStore {
             let assetIDs = Set(component.nodeIDs.compactMap { facesByID[$0]?.assetLocalIdentifier })
             return assetIDs.count < 2
         }.count
-        Diagnostics.shared.log("Face clustering rebuild completed (\(reason)): observations \(candidates.count), clusters \(components.count), provisional \(provisionalCount).")
+        let diagnostics = makeClusteringDiagnostics(
+            reason: reason,
+            nodes: nodes,
+            components: components,
+            provisionalCount: provisionalCount
+        )
+        saveClusteringDiagnostics(diagnostics)
+        Diagnostics.shared.log("Face clustering rebuild completed (\(reason)): observations \(candidates.count), clusters \(components.count), provisional \(provisionalCount), largest \(diagnostics.largestClusterSize), median \(diagnostics.medianClusterSize), singleton \(diagnostics.singletonClusterCount), top20 \(diagnostics.topClusterSizes.prefix(20)).")
+    }
+
+    private func makeClusteringDiagnostics(
+        reason: String,
+        nodes: [FaceClusteringObservationNode],
+        components: [FaceClusteringComponent],
+        provisionalCount: Int
+    ) -> FaceClusteringDiagnosticsSnapshot {
+        let clusterSizes = components.map(\.nodeIDs.count).sorted(by: >)
+        let medianClusterSize = clusterSizes.isEmpty ? 0 : clusterSizes[clusterSizes.count / 2]
+        let pairStats = pairSimilarityStats(for: nodes)
+        return FaceClusteringDiagnosticsSnapshot(
+            generatedAt: Date(),
+            reason: reason,
+            thresholdProfile: FaceThresholdDiagnostics(
+                possibleMatchThreshold: configuration.possibleMatchThreshold,
+                autoMatchThreshold: configuration.autoMatchThreshold,
+                singleSampleAutoMatchThreshold: configuration.singleSampleAutoMatchThreshold,
+                mergeThreshold: configuration.mergeThreshold,
+                minimumBestSecondBestMargin: configuration.minimumBestSecondBestMargin,
+                graphEdgeSimilarityThreshold: configuration.graphEdgeSimilarityThreshold,
+                graphEdgeSimilarityThresholdForSingleSample: configuration.graphEdgeSimilarityThresholdForSingleSample
+            ),
+            totalFaces: nodes.count,
+            totalPeopleClusters: components.count,
+            largestClusterSize: clusterSizes.first ?? 0,
+            medianClusterSize: medianClusterSize,
+            singletonClusterCount: clusterSizes.filter { $0 == 1 }.count,
+            provisionalClusterCount: provisionalCount,
+            topClusterSizes: Array(clusterSizes.prefix(20)),
+            assignmentDecisionCounts: assignmentDecisionCounts,
+            similarityHistogram: pairStats.similarityHistogram,
+            bestSecondBestMarginHistogram: pairStats.marginHistogram
+        )
+    }
+
+    private func pairSimilarityStats(
+        for nodes: [FaceClusteringObservationNode]
+    ) -> (similarityHistogram: [String: Int], marginHistogram: [String: Int]) {
+        var similarityHistogram = FaceClusteringDiagnosticsSnapshot.emptySimilarityHistogram()
+        var marginHistogram = FaceClusteringDiagnosticsSnapshot.emptyMarginHistogram()
+        guard nodes.count <= configuration.maximumAllPairsClusteringFaceCount else {
+            return (similarityHistogram, marginHistogram)
+        }
+
+        var topSimilaritiesByNode = Array(
+            repeating: (best: Optional<Float>.none, second: Optional<Float>.none),
+            count: nodes.count
+        )
+        for leftIndex in nodes.indices {
+            for rightIndex in nodes.indices where rightIndex > leftIndex {
+                guard nodes[leftIndex].assetLocalIdentifier != nodes[rightIndex].assetLocalIdentifier else {
+                    continue
+                }
+                let similarity = nodes[leftIndex].embedding.cosineSimilarity(to: nodes[rightIndex].embedding)
+                similarityHistogram[Self.similarityBucket(for: similarity), default: 0] += 1
+                Self.recordTopSimilarity(similarity, for: leftIndex, in: &topSimilaritiesByNode)
+                Self.recordTopSimilarity(similarity, for: rightIndex, in: &topSimilaritiesByNode)
+            }
+        }
+
+        for pair in topSimilaritiesByNode {
+            guard let best = pair.best, let second = pair.second else { continue }
+            marginHistogram[Self.marginBucket(for: best - second), default: 0] += 1
+        }
+
+        return (similarityHistogram, marginHistogram)
+    }
+
+    private static func recordTopSimilarity(
+        _ similarity: Float,
+        for index: Int,
+        in topSimilaritiesByNode: inout [(best: Float?, second: Float?)]
+    ) {
+        let current = topSimilaritiesByNode[index]
+        if current.best.map({ similarity > $0 }) ?? true {
+            topSimilaritiesByNode[index] = (similarity, current.best)
+        } else if current.second.map({ similarity > $0 }) ?? true {
+            topSimilaritiesByNode[index].second = similarity
+        }
+    }
+
+    private static func similarityBucket(for similarity: Float) -> String {
+        switch similarity {
+        case ..<0.60: return "0.50-0.60"
+        case ..<0.70: return "0.60-0.70"
+        case ..<0.75: return "0.70-0.75"
+        case ..<0.80: return "0.75-0.80"
+        case ..<0.85: return "0.80-0.85"
+        case ..<0.90: return "0.85-0.90"
+        case ..<0.95: return "0.90-0.95"
+        default: return "0.95-1.00"
+        }
+    }
+
+    private static func marginBucket(for margin: Float) -> String {
+        switch margin {
+        case ..<0.005: return "0.000-0.005"
+        case ..<0.010: return "0.005-0.010"
+        case ..<0.015: return "0.010-0.015"
+        case ..<0.025: return "0.015-0.025"
+        case ..<0.050: return "0.025-0.050"
+        default: return "0.050+"
+        }
+    }
+
+    private func saveClusteringDiagnostics(_ diagnostics: FaceClusteringDiagnosticsSnapshot) {
+        guard let url = Self.clusteringDiagnosticsURL() else { return }
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let data = try JSONEncoder.pretty.encode(diagnostics)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            Diagnostics.shared.log("Failed to save face clustering diagnostics: \(error.localizedDescription)")
+        }
     }
 
     private func logEmbeddingHealthIfReady(_ report: FaceEmbeddingHealthReport) {
@@ -711,10 +854,22 @@ final class FaceRecognitionStore {
         do {
             let data = try Data(contentsOf: url)
             let snapshot = try JSONDecoder().decode(FaceDatabaseSnapshot.self, from: data)
+            if snapshot.schemaVersion == 7, FaceDatabaseSchema.currentVersion == 8 {
+                persons = Dictionary(uniqueKeysWithValues: snapshot.persons.map { ($0.id, $0) })
+                facesByID = Dictionary(uniqueKeysWithValues: snapshot.faces.map { ($0.id, $0) })
+                faceIDsByAssetID = snapshot.faceIDsByAssetID
+                indexRecords = snapshot.indexRecords
+                rebuildAutomaticClusters(reason: "schema 8 threshold migration")
+                refreshPeople(persist: true, allowReorder: true)
+                lastIndexingSummary = "Face clustering thresholds were tuned. Picscry rebuilt automatic unknown people while preserving named people and manual corrections."
+                Diagnostics.shared.log("Migrated face database schema 7 to 8 with automatic reclustering. People \(persons.count), faces \(facesByID.count).")
+                return
+            }
+
             guard snapshot.schemaVersion == FaceDatabaseSchema.currentVersion else {
                 Diagnostics.shared.log("Discarding old face database schema \(snapshot.schemaVersion); current schema is \(FaceDatabaseSchema.currentVersion). Reindex required.")
                 resetPersistedState(at: url)
-                lastIndexingSummary = "Face recognition model conversion was corrected. Picscry will reindex faces on this device."
+                lastIndexingSummary = "Face recognition clustering was upgraded. Picscry will reindex faces on this device."
                 return
             }
 
@@ -769,6 +924,13 @@ final class FaceRecognitionStore {
             .appendingPathComponent("faces.json", isDirectory: false)
     }
 
+    private static func clusteringDiagnosticsURL() -> URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent("FaceRecognition", isDirectory: true)
+            .appendingPathComponent("clustering-diagnostics.json", isDirectory: false)
+    }
+
     private static func normalizedName(_ name: String) -> String? {
         let collapsed = name
             .split(whereSeparator: \.isWhitespace)
@@ -787,7 +949,64 @@ final class FaceRecognitionStore {
 }
 
 private enum FaceDatabaseSchema {
-    static let currentVersion = 7
+    static let currentVersion = 8
+}
+
+private struct FaceThresholdDiagnostics: Codable {
+    let possibleMatchThreshold: Float
+    let autoMatchThreshold: Float
+    let singleSampleAutoMatchThreshold: Float
+    let mergeThreshold: Float
+    let minimumBestSecondBestMargin: Float
+    let graphEdgeSimilarityThreshold: Float
+    let graphEdgeSimilarityThresholdForSingleSample: Float
+}
+
+private struct FaceAssignmentDecisionCounts: Codable {
+    var existingPerson = 0
+    var newPerson = 0
+    var ambiguous = 0
+    var deferredProvisional = 0
+}
+
+private struct FaceClusteringDiagnosticsSnapshot: Codable {
+    let generatedAt: Date
+    let reason: String
+    let thresholdProfile: FaceThresholdDiagnostics
+    let totalFaces: Int
+    let totalPeopleClusters: Int
+    let largestClusterSize: Int
+    let medianClusterSize: Int
+    let singletonClusterCount: Int
+    let provisionalClusterCount: Int
+    let topClusterSizes: [Int]
+    let assignmentDecisionCounts: FaceAssignmentDecisionCounts
+    let similarityHistogram: [String: Int]
+    let bestSecondBestMarginHistogram: [String: Int]
+
+    static func emptySimilarityHistogram() -> [String: Int] {
+        [
+            "0.50-0.60": 0,
+            "0.60-0.70": 0,
+            "0.70-0.75": 0,
+            "0.75-0.80": 0,
+            "0.80-0.85": 0,
+            "0.85-0.90": 0,
+            "0.90-0.95": 0,
+            "0.95-1.00": 0
+        ]
+    }
+
+    static func emptyMarginHistogram() -> [String: Int] {
+        [
+            "0.000-0.005": 0,
+            "0.005-0.010": 0,
+            "0.010-0.015": 0,
+            "0.015-0.025": 0,
+            "0.025-0.050": 0,
+            "0.050+": 0
+        ]
+    }
 }
 
 private struct FaceDatabaseSnapshot: Codable {
@@ -877,5 +1096,13 @@ private struct AssetIndexRecord: Codable {
         assetPixelWidth = asset.pixelWidth
         assetPixelHeight = asset.pixelHeight
         self.faceCount = faceCount
+    }
+}
+
+private extension JSONEncoder {
+    static var pretty: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return encoder
     }
 }

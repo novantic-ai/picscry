@@ -158,20 +158,16 @@ final class PicscryTests: XCTestCase {
         }
     }
 
-    func testSingleSampleClusterRequiresHigherThreshold() {
+    func testSingleSampleClusterUsesTunedThreshold() {
         let personID = UUID()
-        var configuration = FaceRecognitionConfiguration()
-        configuration.autoMatchThreshold = 0.84
-        configuration.singleSampleAutoMatchThreshold = 0.88
-        configuration.possibleMatchThreshold = 0.76
-        let engine = FaceClusteringEngine(configuration: configuration)
+        let engine = FaceClusteringEngine()
         let cluster = FaceCluster(personID: personID, centroid: [1, 0, 0], faceCount: 1, name: nil)
-        let assignment = engine.assignment(for: [0.86, 0.510294, 0], clusters: [cluster])
+        let assignment = engine.assignment(for: vector(similarityToXAxis: 0.81), clusters: [cluster])
 
-        if case let .ambiguous(bestPersonID, _) = assignment.kind {
-            XCTAssertEqual(bestPersonID, personID)
+        if case let .existingPerson(assignedID, _) = assignment.kind {
+            XCTAssertEqual(assignedID, personID)
         } else {
-            XCTFail("Expected ambiguous assignment below the single-sample auto threshold.")
+            XCTFail("Expected same person assignment at the tuned single-sample threshold.")
         }
     }
 
@@ -245,6 +241,59 @@ final class PicscryTests: XCTestCase {
         }
     }
 
+    func testModerateSingleSampleSimilarityClustersSamePerson() {
+        let personID = UUID()
+        let engine = FaceClusteringEngine()
+        let assignment = engine.assignment(
+            for: vector(similarityToXAxis: 0.81),
+            clusters: [FaceCluster(personID: personID, centroid: [1, 0, 0], faceCount: 1, name: nil)]
+        )
+
+        if case let .existingPerson(assignedID, similarity) = assignment.kind {
+            XCTAssertEqual(assignedID, personID)
+            XCTAssertEqual(similarity, 0.81, accuracy: 0.0001)
+        } else {
+            XCTFail("Expected existing person for moderate same-person similarity.")
+        }
+    }
+
+    func testWeakSecondBestDoesNotBlockAssignment() {
+        let bestID = UUID()
+        let engine = FaceClusteringEngine()
+        let assignment = engine.assignment(
+            for: [1, 0, 0],
+            clusters: [
+                FaceCluster(personID: bestID, centroid: vector(similarityToXAxis: 0.82), faceCount: 2, name: nil),
+                FaceCluster(personID: UUID(), centroid: vector(similarityToXAxis: 0.65), faceCount: 2, name: nil)
+            ]
+        )
+
+        if case let .existingPerson(assignedID, _) = assignment.kind {
+            XCTAssertEqual(assignedID, bestID)
+        } else {
+            XCTFail("Expected weak second-best candidate to be ignored.")
+        }
+    }
+
+    func testRealAmbiguityDefersProvisionalAssignment() {
+        let bestID = UUID()
+        let engine = FaceClusteringEngine()
+        let assignment = engine.assignment(
+            for: [1, 0, 0],
+            clusters: [
+                FaceCluster(personID: bestID, centroid: vector(similarityToXAxis: 0.82), faceCount: 2, name: nil),
+                FaceCluster(personID: UUID(), centroid: vector(similarityToXAxis: 0.815), faceCount: 2, name: nil)
+            ]
+        )
+
+        if case let .deferredProvisional(bestPersonID, similarity) = assignment.kind {
+            XCTAssertEqual(bestPersonID, bestID)
+            XCTAssertEqual(similarity ?? 0, 0.82, accuracy: 0.0001)
+        } else {
+            XCTFail("Expected close best and second-best candidates to defer.")
+        }
+    }
+
     func testUpdatedCentroidNormalizesResult() {
         let engine = FaceClusteringEngine()
         let centroid = engine.updatedCentroid(existing: [1, 0], existingCount: 1, adding: [0, 1])
@@ -305,6 +354,53 @@ final class PicscryTests: XCTestCase {
         XCTAssertTrue(components.contains { $0.nodeIDs.contains(firstSamePhoto) })
         XCTAssertTrue(components.contains { $0.nodeIDs.contains(secondSamePhoto) })
         XCTAssertTrue(components.contains { $0.nodeIDs.contains(laterMatch) })
+    }
+
+    func testRebuildMergePassMergesSamePersonChain() {
+        let engine = FaceClusteringEngine()
+        let first = UUID()
+        let second = UUID()
+        let third = UUID()
+        let angle = acos(Float(0.82))
+        let nodes = [
+            FaceClusteringObservationNode(id: first, assetLocalIdentifier: "asset-a", embedding: [1, 0, 0]),
+            FaceClusteringObservationNode(id: second, assetLocalIdentifier: "asset-b", embedding: [cos(angle), sin(angle), 0]),
+            FaceClusteringObservationNode(id: third, assetLocalIdentifier: "asset-c", embedding: [cos(angle * 2), sin(angle * 2), 0])
+        ]
+
+        let initial = engine.constrainedComponents(for: nodes, similarityThreshold: 0.80)
+        let merged = engine.mergedConstrainedComponents(from: initial, nodes: nodes, mergeThreshold: 0.79)
+
+        XCTAssertEqual(merged.count, 1)
+        XCTAssertEqual(Set(merged[0].nodeIDs), Set([first, second, third]))
+    }
+
+    func testMergePassKeepsSamePhotoFacesSeparate() {
+        let engine = FaceClusteringEngine()
+        let firstSamePhoto = UUID()
+        let secondSamePhoto = UUID()
+        let laterMatch = UUID()
+        let nodes = [
+            FaceClusteringObservationNode(id: firstSamePhoto, assetLocalIdentifier: "asset-a", embedding: [1, 0, 0]),
+            FaceClusteringObservationNode(id: secondSamePhoto, assetLocalIdentifier: "asset-a", embedding: [1, 0, 0]),
+            FaceClusteringObservationNode(id: laterMatch, assetLocalIdentifier: "asset-b", embedding: [1, 0, 0])
+        ]
+
+        let initial = engine.constrainedComponents(for: nodes, similarityThreshold: 0.80)
+        let merged = engine.mergedConstrainedComponents(from: initial, nodes: nodes, mergeThreshold: 0.79)
+
+        XCTAssertEqual(merged.count, 2)
+        XCTAssertFalse(merged.contains { component in
+            component.nodeIDs.contains(firstSamePhoto) && component.nodeIDs.contains(secondSamePhoto)
+        })
+    }
+
+    func testDifferentNamedPeopleAreNotAutomaticMergeCandidates() {
+        let engine = FaceClusteringEngine()
+        let left = FaceCluster(personID: UUID(), centroid: [1, 0, 0], faceCount: 4, name: "Ana")
+        let right = FaceCluster(personID: UUID(), centroid: [1, 0, 0], faceCount: 4, name: "Bo")
+
+        XCTAssertFalse(engine.canAutomaticallyMerge(left: left, right: right, similarity: 0.99))
     }
 
     func testEmbeddingHealthDetectsCollapse() {
@@ -454,5 +550,9 @@ final class PicscryTests: XCTestCase {
         }
 
         return context.makeImage()
+    }
+
+    private func vector(similarityToXAxis similarity: Float) -> [Float] {
+        [similarity, sqrt(max(Float(0), 1 - (similarity * similarity))), 0]
     }
 }
