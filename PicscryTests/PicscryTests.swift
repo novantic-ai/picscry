@@ -162,7 +162,7 @@ final class PicscryTests: XCTestCase {
         let personID = UUID()
         let engine = FaceClusteringEngine()
         let cluster = FaceCluster(personID: personID, centroid: [1, 0, 0], faceCount: 1, name: nil)
-        let assignment = engine.assignment(for: vector(similarityToXAxis: 0.81), clusters: [cluster])
+        let assignment = engine.assignment(for: vector(similarityToXAxis: 0.56), clusters: [cluster])
 
         if case let .existingPerson(assignedID, _) = assignment.kind {
             XCTAssertEqual(assignedID, personID)
@@ -245,13 +245,13 @@ final class PicscryTests: XCTestCase {
         let personID = UUID()
         let engine = FaceClusteringEngine()
         let assignment = engine.assignment(
-            for: vector(similarityToXAxis: 0.81),
+            for: vector(similarityToXAxis: 0.56),
             clusters: [FaceCluster(personID: personID, centroid: [1, 0, 0], faceCount: 1, name: nil)]
         )
 
         if case let .existingPerson(assignedID, similarity) = assignment.kind {
             XCTAssertEqual(assignedID, personID)
-            XCTAssertEqual(similarity, 0.81, accuracy: 0.0001)
+            XCTAssertEqual(similarity, 0.56, accuracy: 0.0001)
         } else {
             XCTFail("Expected existing person for moderate same-person similarity.")
         }
@@ -264,7 +264,7 @@ final class PicscryTests: XCTestCase {
             for: [1, 0, 0],
             clusters: [
                 FaceCluster(personID: bestID, centroid: vector(similarityToXAxis: 0.82), faceCount: 2, name: nil),
-                FaceCluster(personID: UUID(), centroid: vector(similarityToXAxis: 0.65), faceCount: 2, name: nil)
+                FaceCluster(personID: UUID(), centroid: vector(similarityToXAxis: 0.35), faceCount: 2, name: nil)
             ]
         )
 
@@ -393,6 +393,138 @@ final class PicscryTests: XCTestCase {
         XCTAssertFalse(merged.contains { component in
             component.nodeIDs.contains(firstSamePhoto) && component.nodeIDs.contains(secondSamePhoto)
         })
+    }
+
+    func testUnknownClustersMergeAtSFaceCalibratedThreshold() {
+        let engine = FaceClusteringEngine()
+        let first = FaceCluster(
+            personID: UUID(),
+            centroid: [1, 0, 0],
+            faceCount: 1,
+            name: nil,
+            assetLocalIdentifiers: ["asset-a"]
+        )
+        let second = FaceCluster(
+            personID: UUID(),
+            centroid: vector(similarityToXAxis: 0.53),
+            faceCount: 1,
+            name: nil,
+            assetLocalIdentifiers: ["asset-b"]
+        )
+        let score = FaceClusterPairScore(
+            centroidSimilarity: 0.53,
+            bestPairSimilarity: 0.53,
+            topKAverageSimilarity: 0.53,
+            bestSecondBestMargin: nil
+        )
+
+        XCTAssertTrue(engine.mergeDecision(left: first, right: second, score: score).accepted)
+    }
+
+    func testSingleSampleFragmentationRepairMakesNextAssignmentStable() {
+        let engine = FaceClusteringEngine()
+        let firstID = UUID()
+        let secondID = UUID()
+        let firstEmbedding: [Float] = [1, 0, 0]
+        let secondEmbedding = vector(similarityToXAxis: 0.54)
+        let firstCluster = FaceCluster(personID: firstID, centroid: firstEmbedding, faceCount: 1, name: nil)
+
+        let firstAssignment = engine.assignment(for: secondEmbedding, clusters: [firstCluster])
+        if case .existingPerson = firstAssignment.kind {
+            XCTFail("Expected online assignment to avoid auto-joining below the single-sample threshold.")
+        }
+
+        let nodes = [
+            FaceClusteringObservationNode(id: firstID, assetLocalIdentifier: "asset-a", embedding: firstEmbedding),
+            FaceClusteringObservationNode(id: secondID, assetLocalIdentifier: "asset-b", embedding: secondEmbedding)
+        ]
+        let mergeResult = engine.mergedConstrainedComponentResult(
+            from: nodes.map { FaceClusteringComponent(nodeIDs: [$0.id]) },
+            nodes: nodes,
+            mergeThreshold: 0.52
+        )
+
+        XCTAssertEqual(mergeResult.components.count, 1)
+        XCTAssertEqual(mergeResult.stats.acceptedMerges, 1)
+
+        let repairedCentroid = engine.mergedCentroid(clusters: [
+            (centroid: firstEmbedding, count: 1),
+            (centroid: secondEmbedding, count: 1)
+        ])
+        let repairedCluster = FaceCluster(personID: firstID, centroid: repairedCentroid, faceCount: 2, name: nil)
+        let nextAssignment = engine.assignment(for: secondEmbedding, clusters: [repairedCluster])
+
+        if case let .existingPerson(assignedID, _) = nextAssignment.kind {
+            XCTAssertEqual(assignedID, firstID)
+        } else {
+            XCTFail("Expected the repaired multi-face cluster to receive the next same-person face.")
+        }
+    }
+
+    func testNamedPersonCanAbsorbUnknownAboveThreshold() {
+        let engine = FaceClusteringEngine()
+        let named = FaceCluster(
+            personID: UUID(),
+            centroid: [1, 0, 0],
+            faceCount: 4,
+            name: "Sujana",
+            assetLocalIdentifiers: ["asset-a"]
+        )
+        let unknown = FaceCluster(
+            personID: UUID(),
+            centroid: vector(similarityToXAxis: 0.55),
+            faceCount: 2,
+            name: nil,
+            assetLocalIdentifiers: ["asset-b", "asset-c"]
+        )
+        let score = FaceClusterPairScore(
+            centroidSimilarity: 0.55,
+            bestPairSimilarity: 0.56,
+            topKAverageSimilarity: 0.55,
+            bestSecondBestMargin: nil
+        )
+
+        XCTAssertTrue(engine.mergeDecision(left: named, right: unknown, score: score).accepted)
+    }
+
+    func testUnsafeMergeMarginIsRejected() {
+        let engine = FaceClusteringEngine()
+        let first = FaceCluster(personID: UUID(), centroid: [1, 0, 0], faceCount: 2, name: nil)
+        let second = FaceCluster(personID: UUID(), centroid: vector(similarityToXAxis: 0.60), faceCount: 2, name: nil)
+        let score = FaceClusterPairScore(
+            centroidSimilarity: 0.60,
+            bestPairSimilarity: 0.60,
+            topKAverageSimilarity: 0.60,
+            bestSecondBestMargin: 0.01
+        )
+
+        let decision = engine.mergeDecision(left: first, right: second, score: score)
+
+        XCTAssertFalse(decision.accepted)
+        XCTAssertEqual(decision.rejectReason, .unsafeMargin)
+    }
+
+    func testManualCorrectionPreventsAutomaticMerge() {
+        let engine = FaceClusteringEngine()
+        let corrected = FaceCluster(
+            personID: UUID(),
+            centroid: [1, 0, 0],
+            faceCount: 2,
+            name: nil,
+            manuallyCorrectedFaceCount: 1
+        )
+        let unknown = FaceCluster(personID: UUID(), centroid: [1, 0, 0], faceCount: 2, name: nil)
+        let score = FaceClusterPairScore(
+            centroidSimilarity: 1,
+            bestPairSimilarity: 1,
+            topKAverageSimilarity: 1,
+            bestSecondBestMargin: nil
+        )
+
+        let decision = engine.mergeDecision(left: corrected, right: unknown, score: score)
+
+        XCTAssertFalse(decision.accepted)
+        XCTAssertEqual(decision.rejectReason, .manualCorrection)
     }
 
     func testDifferentNamedPeopleAreNotAutomaticMergeCandidates() {

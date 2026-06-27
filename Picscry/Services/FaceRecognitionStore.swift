@@ -111,7 +111,9 @@ final class FaceRecognitionStore {
         let pending = assets.filter { assetNeedsIndex($0) }
         let alreadyIndexedCount = max(0, totalEligibleImageCount - pending.count)
         guard !pending.isEmpty else {
-            rebuildAutomaticClusters(reason: "no pending photos after \(reason)")
+            if configuration.backgroundMergeEnabled {
+                rebuildAutomaticClusters(reason: "no pending photos after \(reason)")
+            }
             refreshPeople(persist: true, allowReorder: true)
             indexingState = .idle
             currentIndexingMessage = nil
@@ -306,7 +308,9 @@ final class FaceRecognitionStore {
             }
         }
 
-        rebuildAutomaticClusters(reason: "indexing finished")
+        if configuration.fullMergeAfterIndexing {
+            rebuildAutomaticClusters(reason: "indexing finished")
+        }
         refreshPeople(persist: true, allowReorder: true)
         indexingState = .idle
         activeIndexingRunID = nil
@@ -397,8 +401,17 @@ final class FaceRecognitionStore {
             let healthReport = embeddingHealthMonitor.report()
             logEmbeddingHealthIfReady(healthReport)
 
-            let clusters = persons.values.map {
-                FaceCluster(personID: $0.id, centroid: $0.centroid, faceCount: faceCount(for: $0.id), name: $0.name)
+            let clusters = persons.values.map { person in
+                FaceCluster(
+                    personID: person.id,
+                    centroid: person.centroid,
+                    faceCount: faceCount(for: person.id),
+                    name: person.name,
+                    isProvisional: person.isProvisional,
+                    assetLocalIdentifiers: assetIDs(for: person.id),
+                    manuallyCorrectedFaceCount: manuallyCorrectedFaceCount(for: person.id),
+                    representativeQuality: representativeQuality(for: person.id)
+                )
             }
             let excludedPersonIDs: Set<UUID> = configuration.disallowMultipleFacesFromSameAssetForSamePerson
                 ? personIDsAssignedInCurrentAsset
@@ -461,7 +474,8 @@ final class FaceRecognitionStore {
 
         indexRecords[asset.id] = AssetIndexRecord(asset: asset, faceCount: savedObservationCount)
         if savedObservationCount > 0,
-           facesByID.count.isMultiple(of: configuration.clusterRebuildBatchSize) {
+           (facesByID.count.isMultiple(of: configuration.clusterRebuildBatchSize) ||
+            facesByID.count.isMultiple(of: configuration.batchMergeIntervalFaceCount)) {
             rebuildAutomaticClusters(reason: "batch \(facesByID.count)")
         }
     }
@@ -582,6 +596,21 @@ final class FaceRecognitionStore {
         facesByID.values.filter { $0.personID == personID }.count
     }
 
+    private func assetIDs(for personID: UUID) -> Set<String> {
+        Set(facesByID.values.filter { $0.personID == personID }.map(\.assetLocalIdentifier))
+    }
+
+    private func manuallyCorrectedFaceCount(for personID: UUID) -> Int {
+        facesByID.values.filter { $0.personID == personID && $0.isManuallyCorrected }.count
+    }
+
+    private func representativeQuality(for personID: UUID) -> Float {
+        facesByID.values
+            .filter { $0.personID == personID }
+            .map(score)
+            .max() ?? 0
+    }
+
     private func rebuildAutomaticClusters(reason: String) {
         let candidates = facesByID.values
             .filter { face in
@@ -606,6 +635,8 @@ final class FaceRecognitionStore {
             (healthReport.status == .suspiciousCollapsed || healthReport.status == .suspiciousNoisy)
         let oldAutomaticPersonIDs = Set(candidates.map(\.personID))
         let components: [FaceClusteringComponent]
+        let initialComponents: [FaceClusteringComponent]
+        var mergeStats = FaceClusterMergeStats()
         let nodes = candidates.map {
             FaceClusteringObservationNode(
                 id: $0.id,
@@ -615,11 +646,11 @@ final class FaceRecognitionStore {
         }
 
         if shouldDisableAutoClustering {
-            components = candidates.map { FaceClusteringComponent(nodeIDs: [$0.id]) }
+            initialComponents = candidates.map { FaceClusteringComponent(nodeIDs: [$0.id]) }
+            components = initialComponents
             faceRecognitionHealthMessage = "Face recognition embeddings look too similar. Picscry paused auto-grouping to avoid incorrect people."
             Diagnostics.shared.log("Face clustering rebuild skipped grouping (\(reason)): embedding health \(healthReport.status), observations \(candidates.count).")
         } else {
-            let initialComponents: [FaceClusteringComponent]
             if nodes.count <= configuration.maximumAllPairsClusteringFaceCount {
                 initialComponents = clusteringEngine.constrainedComponents(
                     for: nodes,
@@ -634,13 +665,15 @@ final class FaceRecognitionStore {
                 )
                 Diagnostics.shared.log("Face clustering rebuild using incremental constrained fallback (\(reason)): observations \(nodes.count), threshold \(configuration.graphEdgeSimilarityThreshold).")
             }
-            components = clusteringEngine.mergedConstrainedComponents(
+            let mergeResult = clusteringEngine.mergedConstrainedComponentResult(
                 from: initialComponents,
                 nodes: nodes,
                 mergeThreshold: configuration.mergeThreshold
             )
+            components = mergeResult.components
+            mergeStats = mergeResult.stats
             if components.count != initialComponents.count {
-                Diagnostics.shared.log("Face clustering merge pass (\(reason)): reduced clusters from \(initialComponents.count) to \(components.count), threshold \(configuration.mergeThreshold).")
+                Diagnostics.shared.log("Face clustering merge pass (\(reason)): reduced clusters from \(initialComponents.count) to \(components.count), accepted \(mergeStats.acceptedMerges), threshold \(configuration.mergeThreshold).")
             }
         }
 
@@ -676,8 +709,10 @@ final class FaceRecognitionStore {
         let diagnostics = makeClusteringDiagnostics(
             reason: reason,
             nodes: nodes,
+            initialComponents: initialComponents,
             components: components,
-            provisionalCount: provisionalCount
+            provisionalCount: provisionalCount,
+            mergeStats: mergeStats
         )
         saveClusteringDiagnostics(diagnostics)
         Diagnostics.shared.log("Face clustering rebuild completed (\(reason)): observations \(candidates.count), clusters \(components.count), provisional \(provisionalCount), largest \(diagnostics.largestClusterSize), median \(diagnostics.medianClusterSize), singleton \(diagnostics.singletonClusterCount), top20 \(diagnostics.topClusterSizes.prefix(20)).")
@@ -686,9 +721,12 @@ final class FaceRecognitionStore {
     private func makeClusteringDiagnostics(
         reason: String,
         nodes: [FaceClusteringObservationNode],
+        initialComponents: [FaceClusteringComponent],
         components: [FaceClusteringComponent],
-        provisionalCount: Int
+        provisionalCount: Int,
+        mergeStats: FaceClusterMergeStats
     ) -> FaceClusteringDiagnosticsSnapshot {
+        let initialClusterSizes = initialComponents.map(\.nodeIDs.count).sorted(by: >)
         let clusterSizes = components.map(\.nodeIDs.count).sorted(by: >)
         let medianClusterSize = clusterSizes.isEmpty ? 0 : clusterSizes[clusterSizes.count / 2]
         let pairStats = pairSimilarityStats(for: nodes)
@@ -700,9 +738,13 @@ final class FaceRecognitionStore {
                 autoMatchThreshold: configuration.autoMatchThreshold,
                 singleSampleAutoMatchThreshold: configuration.singleSampleAutoMatchThreshold,
                 mergeThreshold: configuration.mergeThreshold,
+                pairMergeThreshold: configuration.pairMergeThreshold,
+                namedAbsorbUnknownThreshold: configuration.namedAbsorbUnknownThreshold,
+                largeNamedAbsorbUnknownThreshold: configuration.largeNamedAbsorbUnknownThreshold,
                 minimumBestSecondBestMargin: configuration.minimumBestSecondBestMargin,
                 graphEdgeSimilarityThreshold: configuration.graphEdgeSimilarityThreshold,
-                graphEdgeSimilarityThresholdForSingleSample: configuration.graphEdgeSimilarityThresholdForSingleSample
+                graphEdgeSimilarityThresholdForSingleSample: configuration.graphEdgeSimilarityThresholdForSingleSample,
+                batchMergeIntervalFaceCount: configuration.batchMergeIntervalFaceCount
             ),
             totalFaces: nodes.count,
             totalPeopleClusters: components.count,
@@ -712,6 +754,12 @@ final class FaceRecognitionStore {
             provisionalClusterCount: provisionalCount,
             topClusterSizes: Array(clusterSizes.prefix(20)),
             assignmentDecisionCounts: assignmentDecisionCounts,
+            acceptedMergeCount: mergeStats.acceptedMerges,
+            rejectedMergeCountsByReason: Dictionary(uniqueKeysWithValues: FaceClusterMergeRejectReason.allCases.map {
+                ($0.rawValue, mergeStats.rejectedByReason[$0] ?? 0)
+            }),
+            beforeClusterSizeDistribution: initialClusterSizes,
+            afterClusterSizeDistribution: clusterSizes,
             similarityHistogram: pairStats.similarityHistogram,
             bestSecondBestMarginHistogram: pairStats.marginHistogram
         )
@@ -854,15 +902,15 @@ final class FaceRecognitionStore {
         do {
             let data = try Data(contentsOf: url)
             let snapshot = try JSONDecoder().decode(FaceDatabaseSnapshot.self, from: data)
-            if snapshot.schemaVersion == 7, FaceDatabaseSchema.currentVersion == 8 {
+            if [7, 8].contains(snapshot.schemaVersion), FaceDatabaseSchema.currentVersion == 9 {
                 persons = Dictionary(uniqueKeysWithValues: snapshot.persons.map { ($0.id, $0) })
                 facesByID = Dictionary(uniqueKeysWithValues: snapshot.faces.map { ($0.id, $0) })
                 faceIDsByAssetID = snapshot.faceIDsByAssetID
                 indexRecords = snapshot.indexRecords
-                rebuildAutomaticClusters(reason: "schema 8 threshold migration")
+                rebuildAutomaticClusters(reason: "schema 9 merge refinement migration")
                 refreshPeople(persist: true, allowReorder: true)
-                lastIndexingSummary = "Face clustering thresholds were tuned. Picscry rebuilt automatic unknown people while preserving named people and manual corrections."
-                Diagnostics.shared.log("Migrated face database schema 7 to 8 with automatic reclustering. People \(persons.count), faces \(facesByID.count).")
+                lastIndexingSummary = "Face clustering merge refinement was upgraded. Picscry rebuilt automatic unknown people while preserving named people and manual corrections."
+                Diagnostics.shared.log("Migrated face database schema \(snapshot.schemaVersion) to 9 with merge refinement. People \(persons.count), faces \(facesByID.count).")
                 return
             }
 
@@ -949,7 +997,7 @@ final class FaceRecognitionStore {
 }
 
 private enum FaceDatabaseSchema {
-    static let currentVersion = 8
+    static let currentVersion = 9
 }
 
 private struct FaceThresholdDiagnostics: Codable {
@@ -957,9 +1005,13 @@ private struct FaceThresholdDiagnostics: Codable {
     let autoMatchThreshold: Float
     let singleSampleAutoMatchThreshold: Float
     let mergeThreshold: Float
+    let pairMergeThreshold: Float
+    let namedAbsorbUnknownThreshold: Float
+    let largeNamedAbsorbUnknownThreshold: Float
     let minimumBestSecondBestMargin: Float
     let graphEdgeSimilarityThreshold: Float
     let graphEdgeSimilarityThresholdForSingleSample: Float
+    let batchMergeIntervalFaceCount: Int
 }
 
 private struct FaceAssignmentDecisionCounts: Codable {
@@ -981,6 +1033,10 @@ private struct FaceClusteringDiagnosticsSnapshot: Codable {
     let provisionalClusterCount: Int
     let topClusterSizes: [Int]
     let assignmentDecisionCounts: FaceAssignmentDecisionCounts
+    let acceptedMergeCount: Int
+    let rejectedMergeCountsByReason: [String: Int]
+    let beforeClusterSizeDistribution: [Int]
+    let afterClusterSizeDistribution: [Int]
     let similarityHistogram: [String: Int]
     let bestSecondBestMarginHistogram: [String: Int]
 
