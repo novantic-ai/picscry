@@ -8,15 +8,15 @@ struct FaceRecognitionConfiguration {
 
     var faceProcessingMaxDimension: CGFloat = 1_600
     var minimumFacePixelSize: CGFloat = 48
-    var autoMatchThreshold: Float = 0.52
-    var possibleMatchThreshold: Float = 0.42
-    var mergeThreshold: Float = 0.52
-    var pairMergeThreshold: Float = 0.56
-    var namedAbsorbUnknownThreshold: Float = 0.54
-    var largeNamedAbsorbUnknownThreshold: Float = 0.56
+    var autoMatchThreshold: Float = 0.66
+    var possibleMatchThreshold: Float = 0.45
+    var mergeThreshold: Float = 0.68
+    var pairMergeThreshold: Float = 0.72
+    var namedAbsorbUnknownThreshold: Float = 0.74
+    var largeNamedAbsorbUnknownThreshold: Float = 0.78
     var disallowMultipleFacesFromSameAssetForSamePerson: Bool = true
-    var singleSampleAutoMatchThreshold: Float = 0.56
-    var minimumBestSecondBestMargin: Float = 0.035
+    var singleSampleAutoMatchThreshold: Float = 0.72
+    var minimumBestSecondBestMargin: Float = 0.10
     var representativeThumbnailSize: CGFloat = 256
     var avatarPaddingRatio: CGFloat = 0.85
     var modelInputPaddingRatio: CGFloat = 0.25
@@ -34,8 +34,8 @@ struct FaceRecognitionConfiguration {
     var disableAutoClusteringWhenEmbeddingHealthSuspicious = true
     var clusterRebuildBatchSize: Int = 100
     var maximumAllPairsClusteringFaceCount: Int = 5_000
-    var graphEdgeSimilarityThreshold: Float = 0.50
-    var graphEdgeSimilarityThresholdForSingleSample: Float = 0.52
+    var graphEdgeSimilarityThreshold: Float = 0.66
+    var graphEdgeSimilarityThresholdForSingleSample: Float = 0.70
 }
 
 struct PersonSummary: Identifiable, Hashable {

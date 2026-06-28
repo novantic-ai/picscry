@@ -162,12 +162,45 @@ final class PicscryTests: XCTestCase {
         let personID = UUID()
         let engine = FaceClusteringEngine()
         let cluster = FaceCluster(personID: personID, centroid: [1, 0, 0], faceCount: 1, name: nil)
-        let assignment = engine.assignment(for: vector(similarityToXAxis: 0.56), clusters: [cluster])
+        let assignment = engine.assignment(for: vector(similarityToXAxis: 0.72), clusters: [cluster])
 
         if case let .existingPerson(assignedID, _) = assignment.kind {
             XCTAssertEqual(assignedID, personID)
         } else {
             XCTFail("Expected same person assignment at the tuned single-sample threshold.")
+        }
+    }
+
+    func testPermissiveVerificationSimilarityDoesNotAutoAssign() {
+        let personID = UUID()
+        let engine = FaceClusteringEngine()
+        let cluster = FaceCluster(personID: personID, centroid: [1, 0, 0], faceCount: 2, name: nil)
+        let assignment = engine.assignment(for: vector(similarityToXAxis: 0.52), clusters: [cluster])
+
+        if case let .ambiguous(bestPersonID, similarity) = assignment.kind {
+            XCTAssertEqual(bestPersonID, personID)
+            XCTAssertEqual(similarity, 0.52, accuracy: 0.0001)
+        } else {
+            XCTFail("Expected 0.52 similarity to stay ambiguous, not auto-assign.")
+        }
+    }
+
+    func testStableClusterAutoAssignsAtPrecisionThresholdWithSafeMargin() {
+        let bestID = UUID()
+        let engine = FaceClusteringEngine()
+        let assignment = engine.assignment(
+            for: [1, 0, 0],
+            clusters: [
+                FaceCluster(personID: bestID, centroid: vector(similarityToXAxis: 0.66), faceCount: 3, name: nil),
+                FaceCluster(personID: UUID(), centroid: vector(similarityToXAxis: 0.45), faceCount: 3, name: nil)
+            ]
+        )
+
+        if case let .existingPerson(assignedID, similarity) = assignment.kind {
+            XCTAssertEqual(assignedID, bestID)
+            XCTAssertEqual(similarity, 0.66, accuracy: 0.0001)
+        } else {
+            XCTFail("Expected stable multi-face cluster to auto-assign at 0.66 with a safe margin.")
         }
     }
 
@@ -245,13 +278,13 @@ final class PicscryTests: XCTestCase {
         let personID = UUID()
         let engine = FaceClusteringEngine()
         let assignment = engine.assignment(
-            for: vector(similarityToXAxis: 0.56),
+            for: vector(similarityToXAxis: 0.72),
             clusters: [FaceCluster(personID: personID, centroid: [1, 0, 0], faceCount: 1, name: nil)]
         )
 
         if case let .existingPerson(assignedID, similarity) = assignment.kind {
             XCTAssertEqual(assignedID, personID)
-            XCTAssertEqual(similarity, 0.56, accuracy: 0.0001)
+            XCTAssertEqual(similarity, 0.72, accuracy: 0.0001)
         } else {
             XCTFail("Expected existing person for moderate same-person similarity.")
         }
@@ -406,27 +439,87 @@ final class PicscryTests: XCTestCase {
         )
         let second = FaceCluster(
             personID: UUID(),
-            centroid: vector(similarityToXAxis: 0.53),
+            centroid: vector(similarityToXAxis: 0.68),
             faceCount: 1,
             name: nil,
             assetLocalIdentifiers: ["asset-b"]
         )
         let score = FaceClusterPairScore(
-            centroidSimilarity: 0.53,
-            bestPairSimilarity: 0.53,
-            topKAverageSimilarity: 0.53,
+            centroidSimilarity: 0.68,
+            bestPairSimilarity: 0.72,
+            topKAverageSimilarity: 0.68,
             bestSecondBestMargin: nil
         )
 
         XCTAssertTrue(engine.mergeDecision(left: first, right: second, score: score).accepted)
     }
 
-    func testSingleSampleFragmentationRepairMakesNextAssignmentStable() {
+    func testPermissiveSFaceVerificationRangeDoesNotAutoMerge() {
         let engine = FaceClusteringEngine()
+        let first = FaceCluster(
+            personID: UUID(),
+            centroid: [1, 0, 0],
+            faceCount: 1,
+            name: nil,
+            assetLocalIdentifiers: ["asset-a"]
+        )
+        let second = FaceCluster(
+            personID: UUID(),
+            centroid: vector(similarityToXAxis: 0.64),
+            faceCount: 1,
+            name: nil,
+            assetLocalIdentifiers: ["asset-b"]
+        )
+        let score = FaceClusterPairScore(
+            centroidSimilarity: 0.64,
+            bestPairSimilarity: 0.64,
+            topKAverageSimilarity: 0.64,
+            bestSecondBestMargin: nil
+        )
+
+        let decision = engine.mergeDecision(left: first, right: second, score: score)
+
+        XCTAssertFalse(decision.accepted)
+        XCTAssertEqual(decision.rejectReason, .belowThreshold)
+    }
+
+    func testUnknownMergeRequiresCentroidAndPairEvidence() {
+        let engine = FaceClusteringEngine()
+        let first = FaceCluster(
+            personID: UUID(),
+            centroid: [1, 0, 0],
+            faceCount: 2,
+            name: nil,
+            assetLocalIdentifiers: ["asset-a", "asset-b"]
+        )
+        let second = FaceCluster(
+            personID: UUID(),
+            centroid: vector(similarityToXAxis: 0.70),
+            faceCount: 2,
+            name: nil,
+            assetLocalIdentifiers: ["asset-c", "asset-d"]
+        )
+        let score = FaceClusterPairScore(
+            centroidSimilarity: 0.70,
+            bestPairSimilarity: 0.71,
+            topKAverageSimilarity: 0.69,
+            bestSecondBestMargin: nil
+        )
+
+        let decision = engine.mergeDecision(left: first, right: second, score: score)
+
+        XCTAssertFalse(decision.accepted)
+        XCTAssertEqual(decision.rejectReason, .belowThreshold)
+    }
+
+    func testSingleSampleFragmentationRepairMakesNextAssignmentStable() {
+        var configuration = FaceRecognitionConfiguration()
+        configuration.singleSampleAutoMatchThreshold = 0.74
+        let engine = FaceClusteringEngine(configuration: configuration)
         let firstID = UUID()
         let secondID = UUID()
         let firstEmbedding: [Float] = [1, 0, 0]
-        let secondEmbedding = vector(similarityToXAxis: 0.54)
+        let secondEmbedding = vector(similarityToXAxis: 0.72)
         let firstCluster = FaceCluster(personID: firstID, centroid: firstEmbedding, faceCount: 1, name: nil)
 
         let firstAssignment = engine.assignment(for: secondEmbedding, clusters: [firstCluster])
@@ -441,7 +534,7 @@ final class PicscryTests: XCTestCase {
         let mergeResult = engine.mergedConstrainedComponentResult(
             from: nodes.map { FaceClusteringComponent(nodeIDs: [$0.id]) },
             nodes: nodes,
-            mergeThreshold: 0.52
+            mergeThreshold: 0.68
         )
 
         XCTAssertEqual(mergeResult.components.count, 1)
@@ -472,15 +565,15 @@ final class PicscryTests: XCTestCase {
         )
         let unknown = FaceCluster(
             personID: UUID(),
-            centroid: vector(similarityToXAxis: 0.55),
+            centroid: vector(similarityToXAxis: 0.74),
             faceCount: 2,
             name: nil,
             assetLocalIdentifiers: ["asset-b", "asset-c"]
         )
         let score = FaceClusterPairScore(
-            centroidSimilarity: 0.55,
-            bestPairSimilarity: 0.56,
-            topKAverageSimilarity: 0.55,
+            centroidSimilarity: 0.74,
+            bestPairSimilarity: 0.74,
+            topKAverageSimilarity: 0.74,
             bestSecondBestMargin: nil
         )
 
@@ -490,11 +583,11 @@ final class PicscryTests: XCTestCase {
     func testUnsafeMergeMarginIsRejected() {
         let engine = FaceClusteringEngine()
         let first = FaceCluster(personID: UUID(), centroid: [1, 0, 0], faceCount: 2, name: nil)
-        let second = FaceCluster(personID: UUID(), centroid: vector(similarityToXAxis: 0.60), faceCount: 2, name: nil)
+        let second = FaceCluster(personID: UUID(), centroid: vector(similarityToXAxis: 0.80), faceCount: 2, name: nil)
         let score = FaceClusterPairScore(
-            centroidSimilarity: 0.60,
-            bestPairSimilarity: 0.60,
-            topKAverageSimilarity: 0.60,
+            centroidSimilarity: 0.80,
+            bestPairSimilarity: 0.80,
+            topKAverageSimilarity: 0.80,
             bestSecondBestMargin: 0.01
         )
 

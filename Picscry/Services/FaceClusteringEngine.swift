@@ -215,12 +215,13 @@ final class FaceClusteringEngine {
             return (false, .unsafeMargin)
         }
 
+        let isNamedAbsorb = left.isNamed != right.isNamed
         let threshold = mergeThreshold(left: left, right: right)
         let strongCentroid = score.centroidSimilarity >= threshold
         let strongPair = score.bestPairSimilarity >= configuration.pairMergeThreshold &&
-            score.topKAverageSimilarity >= configuration.mergeThreshold
+            score.topKAverageSimilarity >= threshold
 
-        guard strongCentroid || strongPair else {
+        guard isNamedAbsorb ? (strongCentroid || strongPair) : (strongCentroid && strongPair) else {
             return (false, .belowThreshold)
         }
 

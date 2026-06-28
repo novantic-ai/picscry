@@ -902,15 +902,15 @@ final class FaceRecognitionStore {
         do {
             let data = try Data(contentsOf: url)
             let snapshot = try JSONDecoder().decode(FaceDatabaseSnapshot.self, from: data)
-            if [7, 8].contains(snapshot.schemaVersion), FaceDatabaseSchema.currentVersion == 9 {
+            if [7, 8, 9].contains(snapshot.schemaVersion), FaceDatabaseSchema.currentVersion == 10 {
                 persons = Dictionary(uniqueKeysWithValues: snapshot.persons.map { ($0.id, $0) })
                 facesByID = Dictionary(uniqueKeysWithValues: snapshot.faces.map { ($0.id, $0) })
                 faceIDsByAssetID = snapshot.faceIDsByAssetID
                 indexRecords = snapshot.indexRecords
-                rebuildAutomaticClusters(reason: "schema 9 merge refinement migration")
+                rebuildAutomaticClusters(reason: "schema 10 precision threshold migration")
                 refreshPeople(persist: true, allowReorder: true)
-                lastIndexingSummary = "Face clustering merge refinement was upgraded. Picscry rebuilt automatic unknown people while preserving named people and manual corrections."
-                Diagnostics.shared.log("Migrated face database schema \(snapshot.schemaVersion) to 9 with merge refinement. People \(persons.count), faces \(facesByID.count).")
+                lastIndexingSummary = "Face clustering thresholds were tightened. Picscry rebuilt automatic unknown people while preserving named people and manual corrections."
+                Diagnostics.shared.log("Migrated face database schema \(snapshot.schemaVersion) to 10 with precision-first thresholds. People \(persons.count), faces \(facesByID.count).")
                 return
             }
 
@@ -997,7 +997,7 @@ final class FaceRecognitionStore {
 }
 
 private enum FaceDatabaseSchema {
-    static let currentVersion = 9
+    static let currentVersion = 10
 }
 
 private struct FaceThresholdDiagnostics: Codable {
