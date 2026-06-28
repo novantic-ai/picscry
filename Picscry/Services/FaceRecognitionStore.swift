@@ -252,6 +252,11 @@ final class FaceRecognitionStore {
         runID: UUID
     ) async {
         let indexingStartedAt = Date()
+        var performanceMetrics = FaceIndexingPerformanceMetrics(
+            totalEligibleImageCount: totalEligibleImageCount,
+            alreadyIndexedCount: alreadyIndexedCount,
+            pendingImageCount: pending.count
+        )
         var processedThisRun = 0
         var processedOverall = alreadyIndexedCount
         indexingState = .indexing(processed: processedOverall, total: totalEligibleImageCount)
@@ -275,18 +280,26 @@ final class FaceRecognitionStore {
             Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face indexing asset \(offset + 1)/\(pending.count) started: \(asset.id), pixels \(asset.pixelWidth)x\(asset.pixelHeight), modified \(asset.modificationDate?.description ?? "unknown").")
 
             do {
-                let observations = try await process(asset: asset, photoLibraryStore: photoLibraryStore)
+                let result = try await process(asset: asset, photoLibraryStore: photoLibraryStore)
                 guard activeIndexingRunID == runID else {
                     Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Ignoring stale face indexing run after processing \(asset.id).")
                     return
                 }
                 try Task.checkCancellation()
-                saveAndCluster(observations, asset: asset)
-                Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face indexing asset \(offset + 1)/\(pending.count) finished in \(Self.durationText(since: assetStartedAt)): \(asset.id), saved \(observations.count) face observations.")
+                performanceMetrics.record(result)
+                saveAndCluster(result.observations, asset: asset)
+                Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face indexing asset \(offset + 1)/\(pending.count) finished in \(Self.durationText(since: assetStartedAt)): \(asset.id), saved \(result.observations.count) face observations.")
             } catch is CancellationError {
                 indexingState = .paused
                 currentIndexingMessage = "Face indexing paused at \(processedOverall) of \(totalEligibleImageCount)."
                 savePersistedState()
+                saveIndexingPerformanceDiagnostics(performanceMetrics.snapshot(
+                    reason: reason,
+                    completed: false,
+                    duration: Date().timeIntervalSince(indexingStartedAt),
+                    totalFaces: facesByID.count,
+                    visiblePeople: people.count
+                ))
                 Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face indexing cancelled while processing \(asset.id); not recording index record.")
                 return
             } catch {
@@ -318,6 +331,13 @@ final class FaceRecognitionStore {
             rebuildAutomaticClusters(reason: "indexing finished")
         }
         refreshPeople(persist: true, allowReorder: true)
+        saveIndexingPerformanceDiagnostics(performanceMetrics.snapshot(
+            reason: reason,
+            completed: true,
+            duration: Date().timeIntervalSince(indexingStartedAt),
+            totalFaces: facesByID.count,
+            visiblePeople: people.count
+        ))
         indexingState = .idle
         activeIndexingRunID = nil
         activeIndexingAssetFingerprint = nil
@@ -326,7 +346,7 @@ final class FaceRecognitionStore {
         Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face indexing finished (\(reason)) at \(processedOverall)/\(totalEligibleImageCount) photos in \(Self.durationText(since: indexingStartedAt)) with \(facesByID.count) face observations across \(people.count) people.")
     }
 
-    private func process(asset: PhotoAssetSummary, photoLibraryStore: PhotoLibraryStore) async throws -> [FaceObservationInput] {
+    private func process(asset: PhotoAssetSummary, photoLibraryStore: PhotoLibraryStore) async throws -> FaceAssetProcessingResult {
         let imageStartedAt = Date()
         guard let processingImage = await photoLibraryStore.imageForFaceProcessing(
             for: asset,
@@ -334,8 +354,17 @@ final class FaceRecognitionStore {
             timeoutSeconds: configuration.faceImageRequestTimeoutSeconds
         ) else {
             Diagnostics.shared.log("Face indexing asset \(asset.id): no processing image after \(Self.durationText(since: imageStartedAt)); recording zero faces.")
-            return []
+            return FaceAssetProcessingResult(
+                observations: [],
+                imageRequestDuration: Date().timeIntervalSince(imageStartedAt),
+                detectionDuration: 0,
+                embeddingDuration: 0,
+                detectedFaceCount: 0,
+                skippedCropCount: 0,
+                imageUnavailable: true
+            )
         }
+        let imageRequestDuration = Date().timeIntervalSince(imageStartedAt)
         Diagnostics.shared.log("Face indexing asset \(asset.id): processing image ready in \(Self.durationText(since: imageStartedAt)), decoded \(processingImage.pixelWidth)x\(processingImage.pixelHeight).")
 
         let detectionStartedAt = Date()
@@ -343,10 +372,13 @@ final class FaceRecognitionStore {
             in: processingImage.cgImage,
             orientation: processingImage.orientation
         )
+        let detectionDuration = Date().timeIntervalSince(detectionStartedAt)
         Diagnostics.shared.log("Face indexing asset \(asset.id): Vision detected \(detectedFaces.count) faces in \(Self.durationText(since: detectionStartedAt)).")
 
         var observations: [FaceObservationInput] = []
         observations.reserveCapacity(detectedFaces.count)
+        var embeddingDuration: TimeInterval = 0
+        var skippedCropCount = 0
         for (index, detectedFace) in detectedFaces.enumerated() {
             let faceStartedAt = Date()
             guard let crop = cropService.cropFace(
@@ -354,6 +386,7 @@ final class FaceRecognitionStore {
                 detectedFace: detectedFace,
                 configuration: configuration
             ) else {
+                skippedCropCount += 1
                 Diagnostics.shared.log("Face indexing asset \(asset.id): face \(index + 1)/\(detectedFaces.count) crop skipped.")
                 continue
             }
@@ -363,6 +396,7 @@ final class FaceRecognitionStore {
                 for: crop.modelInputImage,
                 debugIdentifier: "\(asset.id)_face\(index + 1)"
             )
+            embeddingDuration += Date().timeIntervalSince(embeddingStartedAt)
             Diagnostics.shared.log("Face crop diagnostics asset \(asset.id), face \(index + 1): modelCrop \(crop.modelInputImage.width)x\(crop.modelInputImage.height), alignment \(crop.alignmentMethod.rawValue), quality \(crop.alignmentQuality), confidence \(detectedFace.confidence).")
             Diagnostics.shared.log("Face indexing asset \(asset.id): face \(index + 1)/\(detectedFaces.count) embedded in \(Self.durationText(since: embeddingStartedAt)); total face time \(Self.durationText(since: faceStartedAt)), confidence \(detectedFace.confidence), alignment \(crop.alignmentMethod.rawValue), alignment quality \(crop.alignmentQuality).")
             observations.append(FaceObservationInput(
@@ -379,7 +413,15 @@ final class FaceRecognitionStore {
             ))
         }
 
-        return observations
+        return FaceAssetProcessingResult(
+            observations: observations,
+            imageRequestDuration: imageRequestDuration,
+            detectionDuration: detectionDuration,
+            embeddingDuration: embeddingDuration,
+            detectedFaceCount: detectedFaces.count,
+            skippedCropCount: skippedCropCount,
+            imageUnavailable: false
+        )
     }
 
     private func saveAndCluster(_ observations: [FaceObservationInput], asset: PhotoAssetSummary) {
@@ -953,6 +995,21 @@ final class FaceRecognitionStore {
         }
     }
 
+    private func saveIndexingPerformanceDiagnostics(_ diagnostics: FaceIndexingPerformanceDiagnosticsSnapshot) {
+        guard let url = Self.indexingPerformanceDiagnosticsURL() else { return }
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let data = try JSONEncoder.pretty.encode(diagnostics)
+            try data.write(to: url, options: .atomic)
+            Diagnostics.shared.log("Saved face indexing performance diagnostics: photos \(diagnostics.processedImageCount)/\(diagnostics.pendingImageCount), imageRequestTotal \(diagnostics.imageRequestTotalDuration), detectionTotal \(diagnostics.detectionTotalDuration), embeddingTotal \(diagnostics.embeddingTotalDuration).")
+        } catch {
+            Diagnostics.shared.log("Failed to save face indexing performance diagnostics: \(error.localizedDescription)")
+        }
+    }
+
     private func logEmbeddingHealthIfReady(_ report: FaceEmbeddingHealthReport) {
         guard report.sampleCount > lastLoggedEmbeddingHealthSampleCount,
               (report.sampleCount == configuration.embeddingCalibrationSampleCount ||
@@ -1095,6 +1152,13 @@ final class FaceRecognitionStore {
             .appendingPathComponent("clustering-diagnostics.json", isDirectory: false)
     }
 
+    private static func indexingPerformanceDiagnosticsURL() -> URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent("FaceRecognition", isDirectory: true)
+            .appendingPathComponent("face-indexing-performance.json", isDirectory: false)
+    }
+
     private static func normalizedName(_ name: String) -> String? {
         let collapsed = name
             .split(whereSeparator: \.isWhitespace)
@@ -1128,6 +1192,109 @@ private struct FaceThresholdDiagnostics: Codable {
     let graphEdgeSimilarityThreshold: Float
     let graphEdgeSimilarityThresholdForSingleSample: Float
     let batchMergeIntervalFaceCount: Int
+}
+
+private struct FaceAssetProcessingResult {
+    let observations: [FaceObservationInput]
+    let imageRequestDuration: TimeInterval
+    let detectionDuration: TimeInterval
+    let embeddingDuration: TimeInterval
+    let detectedFaceCount: Int
+    let skippedCropCount: Int
+    let imageUnavailable: Bool
+}
+
+private struct FaceIndexingPerformanceMetrics {
+    let totalEligibleImageCount: Int
+    let alreadyIndexedCount: Int
+    let pendingImageCount: Int
+    var processedImageCount = 0
+    var imageUnavailableCount = 0
+    var detectedFaceCount = 0
+    var embeddedFaceCount = 0
+    var skippedCropCount = 0
+    var imageRequestTotalDuration: TimeInterval = 0
+    var imageRequestMaxDuration: TimeInterval = 0
+    var detectionTotalDuration: TimeInterval = 0
+    var detectionMaxDuration: TimeInterval = 0
+    var embeddingTotalDuration: TimeInterval = 0
+    var embeddingMaxAssetDuration: TimeInterval = 0
+
+    mutating func record(_ result: FaceAssetProcessingResult) {
+        processedImageCount += 1
+        if result.imageUnavailable {
+            imageUnavailableCount += 1
+        }
+        detectedFaceCount += result.detectedFaceCount
+        embeddedFaceCount += result.observations.count
+        skippedCropCount += result.skippedCropCount
+        imageRequestTotalDuration += result.imageRequestDuration
+        imageRequestMaxDuration = max(imageRequestMaxDuration, result.imageRequestDuration)
+        detectionTotalDuration += result.detectionDuration
+        detectionMaxDuration = max(detectionMaxDuration, result.detectionDuration)
+        embeddingTotalDuration += result.embeddingDuration
+        embeddingMaxAssetDuration = max(embeddingMaxAssetDuration, result.embeddingDuration)
+    }
+
+    func snapshot(
+        reason: String,
+        completed: Bool,
+        duration: TimeInterval,
+        totalFaces: Int,
+        visiblePeople: Int
+    ) -> FaceIndexingPerformanceDiagnosticsSnapshot {
+        FaceIndexingPerformanceDiagnosticsSnapshot(
+            generatedAt: Date(),
+            reason: reason,
+            completed: completed,
+            totalDuration: duration,
+            totalEligibleImageCount: totalEligibleImageCount,
+            alreadyIndexedCount: alreadyIndexedCount,
+            pendingImageCount: pendingImageCount,
+            processedImageCount: processedImageCount,
+            imageUnavailableCount: imageUnavailableCount,
+            detectedFaceCount: detectedFaceCount,
+            embeddedFaceCount: embeddedFaceCount,
+            skippedCropCount: skippedCropCount,
+            imageRequestTotalDuration: imageRequestTotalDuration,
+            imageRequestAverageDuration: processedImageCount == 0 ? 0 : imageRequestTotalDuration / Double(processedImageCount),
+            imageRequestMaxDuration: imageRequestMaxDuration,
+            detectionTotalDuration: detectionTotalDuration,
+            detectionAverageDuration: processedImageCount == 0 ? 0 : detectionTotalDuration / Double(processedImageCount),
+            detectionMaxDuration: detectionMaxDuration,
+            embeddingTotalDuration: embeddingTotalDuration,
+            embeddingAverageDurationPerFace: embeddedFaceCount == 0 ? 0 : embeddingTotalDuration / Double(embeddedFaceCount),
+            embeddingMaxAssetDuration: embeddingMaxAssetDuration,
+            totalPersistedFaceCount: totalFaces,
+            visiblePeopleCount: visiblePeople
+        )
+    }
+}
+
+private struct FaceIndexingPerformanceDiagnosticsSnapshot: Codable {
+    let generatedAt: Date
+    let reason: String
+    let completed: Bool
+    let totalDuration: TimeInterval
+    let totalEligibleImageCount: Int
+    let alreadyIndexedCount: Int
+    let pendingImageCount: Int
+    let processedImageCount: Int
+    let imageUnavailableCount: Int
+    let detectedFaceCount: Int
+    let embeddedFaceCount: Int
+    let skippedCropCount: Int
+    let imageRequestTotalDuration: TimeInterval
+    let imageRequestAverageDuration: TimeInterval
+    let imageRequestMaxDuration: TimeInterval
+    let detectionTotalDuration: TimeInterval
+    let detectionAverageDuration: TimeInterval
+    let detectionMaxDuration: TimeInterval
+    let embeddingTotalDuration: TimeInterval
+    let embeddingAverageDurationPerFace: TimeInterval
+    let embeddingMaxAssetDuration: TimeInterval
+    let totalPersistedFaceCount: Int
+    let visiblePeopleCount: Int
 }
 
 private struct FaceAssignmentDecisionCounts: Codable {
