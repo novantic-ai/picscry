@@ -346,6 +346,17 @@ final class PicscryTests: XCTestCase {
         XCTAssertGreaterThan(merged[0], merged[1])
     }
 
+    func testWeightedCentroidFavorsHigherQualityEmbedding() {
+        let engine = FaceClusteringEngine()
+        let merged = engine.weightedCentroid(embeddings: [
+            (embedding: [1, 0], weight: 3),
+            (embedding: [0, 1], weight: 1)
+        ])
+
+        XCTAssertGreaterThan(merged[0], merged[1])
+        XCTAssertEqual(sqrt(merged.reduce(Float(0)) { $0 + ($1 * $1) }), 1, accuracy: 0.0001)
+    }
+
     func testConstrainedClusteringKeepsSamePhotoFacesSeparate() {
         let engine = FaceClusteringEngine()
         let firstSamePhoto = UUID()

@@ -8,6 +8,7 @@ actor FaceEmbeddingService {
     private static let inputSize = 112
     private let model: MLModel?
     private let modelInputShape: [Int]
+    private let modelInputDataType: MLMultiArrayDataType
     private var didLogInputLayout = false
     private var didLogModelDescription = false
     private var didLogModelOutput = false
@@ -25,6 +26,7 @@ actor FaceEmbeddingService {
             model = nil
         }
         modelInputShape = Self.inputShape(from: model) ?? [3, Self.inputSize, Self.inputSize]
+        modelInputDataType = Self.inputDataType(from: model) ?? .double
     }
 
     var isModelAvailable: Bool {
@@ -42,7 +44,7 @@ actor FaceEmbeddingService {
             Diagnostics.shared.log("Face model output descriptions: \(Self.featureDescriptionText(model.modelDescription.outputDescriptionsByName)).")
         }
 
-        let input = try Self.multiArrayInput(from: faceImage, shape: modelInputShape)
+        let input = try Self.multiArrayInput(from: faceImage, shape: modelInputShape, dataType: modelInputDataType)
         if !didLogInputLayout {
             didLogInputLayout = true
             Diagnostics.shared.log("Face embedding input layout: \(input.layoutDescription), RGB, value range 0...255, OpenCV-equivalent swapRB=true path.")
@@ -84,7 +86,8 @@ actor FaceEmbeddingService {
 
     private static func multiArrayInput(
         from image: CGImage,
-        shape: [Int] = [3, inputSize, inputSize]
+        shape: [Int] = [3, inputSize, inputSize],
+        dataType: MLMultiArrayDataType = .double
     ) throws -> FaceEmbeddingInput {
         let size = inputSize
         let bytesPerPixel = 4
@@ -108,8 +111,8 @@ actor FaceEmbeddingService {
         context.draw(image, in: CGRect(x: 0, y: 0, width: size, height: size))
 
         let normalizedShape = normalizedInputShape(shape)
-        let array = try MLMultiArray(shape: normalizedShape.map(NSNumber.init(value:)), dataType: .double)
-        let pointer = array.dataPointer.bindMemory(to: Double.self, capacity: array.count)
+        let arrayDataType: MLMultiArrayDataType = dataType == .float32 ? .float32 : .double
+        let array = try MLMultiArray(shape: normalizedShape.map(NSNumber.init(value:)), dataType: arrayDataType)
         var stats = FaceEmbeddingInputStats()
 
         for y in 0..<size {
@@ -122,7 +125,7 @@ actor FaceEmbeddingService {
 
                 // OpenCV SFace uses blobFromImage(..., swapRB: true) on BGR OpenCV images,
                 // so the model receives RGB channel values in the 0...255 range.
-                writeModelInput(red: red, green: green, blue: blue, x: x, y: y, into: array, pointer: pointer)
+                writeModelInput(red: red, green: green, blue: blue, x: x, y: y, into: array)
             }
         }
 
@@ -139,17 +142,27 @@ actor FaceEmbeddingService {
     ) throws -> (red: Double, green: Double, blue: Double) {
         let input = try multiArrayInput(from: image, shape: shape)
         let array = input.array
-        let pointer = array.dataPointer.bindMemory(to: Double.self, capacity: array.count)
         let shape = array.shape.map(\.intValue)
         let strides = array.strides.map(\.intValue)
         let channelDimension = shape.count == 4 ? 1 : 0
         let channelStride = strides[channelDimension]
         let baseOffset = shape.count == 4 ? 0 * strides[0] : 0
-        return (
-            red: pointer[baseOffset],
-            green: pointer[baseOffset + channelStride],
-            blue: pointer[baseOffset + (channelStride * 2)]
-        )
+        switch array.dataType {
+        case .float32:
+            let pointer = array.dataPointer.bindMemory(to: Float.self, capacity: array.count)
+            return (
+                red: Double(pointer[baseOffset]),
+                green: Double(pointer[baseOffset + channelStride]),
+                blue: Double(pointer[baseOffset + (channelStride * 2)])
+            )
+        default:
+            let pointer = array.dataPointer.bindMemory(to: Double.self, capacity: array.count)
+            return (
+                red: pointer[baseOffset],
+                green: pointer[baseOffset + channelStride],
+                blue: pointer[baseOffset + (channelStride * 2)]
+            )
+        }
     }
 
     nonisolated static func debugInputShape(from image: CGImage, shape: [Int]) throws -> [Int] {
@@ -209,6 +222,10 @@ actor FaceEmbeddingService {
         return normalizedInputShape(constraint.shape.map(\.intValue))
     }
 
+    private static func inputDataType(from model: MLModel?) -> MLMultiArrayDataType? {
+        model?.modelDescription.inputDescriptionsByName["data"]?.multiArrayConstraint?.dataType
+    }
+
     private static func normalizedInputShape(_ shape: [Int]) -> [Int] {
         if shape == [1, 3, inputSize, inputSize] || shape == [3, inputSize, inputSize] {
             return shape
@@ -225,21 +242,43 @@ actor FaceEmbeddingService {
         blue: Double,
         x: Int,
         y: Int,
-        into array: MLMultiArray,
-        pointer: UnsafeMutablePointer<Double>
+        into array: MLMultiArray
     ) {
         let shape = array.shape.map(\.intValue)
         let strides = array.strides.map(\.intValue)
-        if shape.count == 4 {
-            let base = 0 * strides[0]
-            pointer[base + (0 * strides[1]) + (y * strides[2]) + (x * strides[3])] = red
-            pointer[base + (1 * strides[1]) + (y * strides[2]) + (x * strides[3])] = green
-            pointer[base + (2 * strides[1]) + (y * strides[2]) + (x * strides[3])] = blue
-        } else {
-            pointer[(0 * strides[0]) + (y * strides[1]) + (x * strides[2])] = red
-            pointer[(1 * strides[0]) + (y * strides[1]) + (x * strides[2])] = green
-            pointer[(2 * strides[0]) + (y * strides[1]) + (x * strides[2])] = blue
+        func offsets() -> (red: Int, green: Int, blue: Int) {
+            if shape.count == 4 {
+                let base = 0 * strides[0]
+                return (
+                    red: base + (0 * strides[1]) + (y * strides[2]) + (x * strides[3]),
+                    green: base + (1 * strides[1]) + (y * strides[2]) + (x * strides[3]),
+                    blue: base + (2 * strides[1]) + (y * strides[2]) + (x * strides[3])
+                )
+            }
+            return (
+                red: (0 * strides[0]) + (y * strides[1]) + (x * strides[2]),
+                green: (1 * strides[0]) + (y * strides[1]) + (x * strides[2]),
+                blue: (2 * strides[0]) + (y * strides[1]) + (x * strides[2])
+            )
         }
+        let channelOffsets = offsets()
+        if array.dataType == .float32 {
+            let pointer = array.dataPointer.bindMemory(to: Float.self, capacity: array.count)
+            pointer[channelOffsets.red] = Float(red)
+            pointer[channelOffsets.green] = Float(green)
+            pointer[channelOffsets.blue] = Float(blue)
+            return
+        }
+        let pointer = array.dataPointer.bindMemory(to: Double.self, capacity: array.count)
+        if shape.count == 4 {
+            pointer[channelOffsets.red] = red
+            pointer[channelOffsets.green] = green
+            pointer[channelOffsets.blue] = blue
+            return
+        }
+        pointer[channelOffsets.red] = red
+        pointer[channelOffsets.green] = green
+        pointer[channelOffsets.blue] = blue
     }
 
     private static func featureDescriptionText(_ descriptions: [String: MLFeatureDescription]) -> String {

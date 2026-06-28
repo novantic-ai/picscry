@@ -26,6 +26,10 @@ final class FaceRecognitionStore {
     private var persons: [UUID: StoredPerson] = [:]
     private var facesByID: [UUID: StoredFaceObservation] = [:]
     private var faceIDsByAssetID: [String: [UUID]] = [:]
+    private var faceIDsByPersonID: [UUID: Set<UUID>] = [:]
+    private var assetIDsByPersonID: [UUID: Set<String>] = [:]
+    private var manuallyCorrectedFaceCountsByPersonID: [UUID: Int] = [:]
+    private var representativeQualityByPersonID: [UUID: Float] = [:]
     private var indexRecords: [String: AssetIndexRecord] = [:]
     private var indexingTask: Task<Void, Never>?
     private var activeIndexingAssetFingerprint: String?
@@ -195,8 +199,8 @@ final class FaceRecognitionStore {
 
     func mergePeople(sourcePersonID: UUID, targetPersonID: UUID) async {
         guard sourcePersonID != targetPersonID, persons[sourcePersonID] != nil, persons[targetPersonID] != nil else { return }
-        for faceID in facesByID.values.filter({ $0.personID == sourcePersonID }).map(\.id) {
-            facesByID[faceID]?.personID = targetPersonID
+        for faceID in Array(faceIDsByPersonID[sourcePersonID] ?? []) {
+            moveFaceIndex(faceID, to: targetPersonID)
         }
         persons[sourcePersonID] = nil
         recompute(personID: targetPersonID)
@@ -206,8 +210,7 @@ final class FaceRecognitionStore {
     func moveFaceObservation(_ faceID: UUID, toExistingPersonID personID: UUID) async {
         guard let original = facesByID[faceID], persons[personID] != nil else { return }
         let oldPersonID = original.personID
-        facesByID[faceID]?.personID = personID
-        facesByID[faceID]?.isManuallyCorrected = true
+        moveFaceIndex(faceID, to: personID, isManuallyCorrected: true)
         recompute(personID: oldPersonID)
         recompute(personID: personID)
         deletePersonIfEmpty(oldPersonID)
@@ -224,8 +227,7 @@ final class FaceRecognitionStore {
             isAutomaticCluster: false,
             isProvisional: false
         )
-        facesByID[faceID]?.personID = newPersonID
-        facesByID[faceID]?.isManuallyCorrected = true
+        moveFaceIndex(faceID, to: newPersonID, isManuallyCorrected: true)
         recompute(personID: oldPersonID)
         recompute(personID: newPersonID)
         deletePersonIfEmpty(oldPersonID)
@@ -233,7 +235,11 @@ final class FaceRecognitionStore {
     }
 
     func markFaceIncorrect(_ faceID: UUID) async {
-        facesByID[faceID]?.isManuallyCorrected = true
+        guard var face = facesByID[faceID] else { return }
+        face.isManuallyCorrected = true
+        facesByID[faceID] = face
+        rebuildAggregateIndex(for: face.personID)
+        recompute(personID: face.personID)
         refreshPeople()
     }
 
@@ -401,18 +407,7 @@ final class FaceRecognitionStore {
             let healthReport = embeddingHealthMonitor.report()
             logEmbeddingHealthIfReady(healthReport)
 
-            let clusters = persons.values.map { person in
-                FaceCluster(
-                    personID: person.id,
-                    centroid: person.centroid,
-                    faceCount: faceCount(for: person.id),
-                    name: person.name,
-                    isProvisional: person.isProvisional,
-                    assetLocalIdentifiers: assetIDs(for: person.id),
-                    manuallyCorrectedFaceCount: manuallyCorrectedFaceCount(for: person.id),
-                    representativeQuality: representativeQuality(for: person.id)
-                )
-            }
+            let clusters = clusterSnapshots()
             let excludedPersonIDs: Set<UUID> = configuration.disallowMultipleFacesFromSameAssetForSamePerson
                 ? personIDsAssignedInCurrentAsset
                 : []
@@ -466,6 +461,7 @@ final class FaceRecognitionStore {
             let face = StoredFaceObservation(input: observation, personID: personID)
             facesByID[face.id] = face
             faceIDsByAssetID[asset.id, default: []].append(face.id)
+            addFaceToPersonIndex(face)
             recompute(personID: personID)
             personIDsAssignedInCurrentAsset.insert(personID)
             savedObservationCount += 1
@@ -473,7 +469,8 @@ final class FaceRecognitionStore {
         }
 
         indexRecords[asset.id] = AssetIndexRecord(asset: asset, faceCount: savedObservationCount)
-        if savedObservationCount > 0,
+        if configuration.incrementalClusterRebuildEnabled,
+           savedObservationCount > 0,
            (facesByID.count.isMultiple(of: configuration.clusterRebuildBatchSize) ||
             facesByID.count.isMultiple(of: configuration.batchMergeIntervalFaceCount)) {
             rebuildAutomaticClusters(reason: "batch \(facesByID.count)")
@@ -509,13 +506,13 @@ final class FaceRecognitionStore {
 
     private func summary(for personID: UUID) -> PersonSummary? {
         guard let person = persons[personID] else { return nil }
-        let faceIDs = facesByID.values.filter { $0.personID == personID }
+        let faceCount = faceIDsByPersonID[personID]?.count ?? 0
         return PersonSummary(
             id: person.id,
             displayName: person.displayName,
             isUnknown: person.isUnknown,
-            photoCount: Set(faceIDs.map(\.assetLocalIdentifier)).count,
-            faceCount: faceIDs.count,
+            photoCount: assetIDsByPersonID[personID]?.count ?? 0,
+            faceCount: faceCount,
             representativeFaceImageData: person.representativeImageData,
             isProvisional: person.isProvisional
         )
@@ -570,16 +567,20 @@ final class FaceRecognitionStore {
 
     private func recompute(personID: UUID) {
         guard var person = persons[personID] else { return }
-        let faces = facesByID.values.filter { $0.personID == personID }
+        let faces = sortedFaces(for: personID)
         guard !faces.isEmpty else {
             persons[personID] = person
+            representativeQualityByPersonID[personID] = 0
             return
         }
 
-        let clusters = faces.map { (centroid: $0.embedding, count: 1) }
-        person.centroid = clusteringEngine.mergedCentroid(clusters: clusters)
-        person.representativeImageData = faces.max(by: { score($0) < score($1) })?.faceCropImageData
-        if person.isProvisional && Set(faces.map(\.assetLocalIdentifier)).count >= 2 {
+        person.centroid = clusteringEngine.weightedCentroid(
+            embeddings: faces.map { (embedding: $0.embedding, weight: max(score($0), 0.01)) }
+        )
+        let representative = faces.max(by: { score($0) < score($1) })
+        representativeQualityByPersonID[personID] = representative.map(score) ?? 0
+        person.representativeImageData = representative?.faceCropImageData
+        if person.isProvisional && (assetIDsByPersonID[personID]?.count ?? 0) >= 2 {
             person.isProvisional = false
         }
         person.updatedAt = .now
@@ -593,22 +594,117 @@ final class FaceRecognitionStore {
     }
 
     private func faceCount(for personID: UUID) -> Int {
-        facesByID.values.filter { $0.personID == personID }.count
+        faceIDsByPersonID[personID]?.count ?? 0
     }
 
     private func assetIDs(for personID: UUID) -> Set<String> {
-        Set(facesByID.values.filter { $0.personID == personID }.map(\.assetLocalIdentifier))
+        assetIDsByPersonID[personID] ?? []
     }
 
     private func manuallyCorrectedFaceCount(for personID: UUID) -> Int {
-        facesByID.values.filter { $0.personID == personID && $0.isManuallyCorrected }.count
+        manuallyCorrectedFaceCountsByPersonID[personID] ?? 0
     }
 
     private func representativeQuality(for personID: UUID) -> Float {
-        facesByID.values
-            .filter { $0.personID == personID }
-            .map(score)
-            .max() ?? 0
+        representativeQualityByPersonID[personID] ?? 0
+    }
+
+    private func clusterSnapshots() -> [FaceCluster] {
+        persons.values.map { person in
+            FaceCluster(
+                personID: person.id,
+                centroid: person.centroid,
+                faceCount: faceCount(for: person.id),
+                name: person.name,
+                isProvisional: person.isProvisional,
+                assetLocalIdentifiers: assetIDs(for: person.id),
+                manuallyCorrectedFaceCount: manuallyCorrectedFaceCount(for: person.id),
+                representativeQuality: representativeQuality(for: person.id)
+            )
+        }
+    }
+
+    private func sortedFaces(for personID: UUID) -> [StoredFaceObservation] {
+        (faceIDsByPersonID[personID] ?? [])
+            .compactMap { facesByID[$0] }
+            .sorted {
+                if $0.assetLocalIdentifier != $1.assetLocalIdentifier {
+                    return $0.assetLocalIdentifier < $1.assetLocalIdentifier
+                }
+                return $0.leftToRightIndex < $1.leftToRightIndex
+            }
+    }
+
+    private func addFaceToPersonIndex(_ face: StoredFaceObservation) {
+        faceIDsByPersonID[face.personID, default: []].insert(face.id)
+        assetIDsByPersonID[face.personID, default: []].insert(face.assetLocalIdentifier)
+        if face.isManuallyCorrected {
+            manuallyCorrectedFaceCountsByPersonID[face.personID, default: 0] += 1
+        }
+        representativeQualityByPersonID[face.personID] = max(
+            representativeQualityByPersonID[face.personID] ?? 0,
+            score(face)
+        )
+    }
+
+    private func removeFaceFromPersonIndex(_ face: StoredFaceObservation) {
+        faceIDsByPersonID[face.personID]?.remove(face.id)
+        manuallyCorrectedFaceCountsByPersonID[face.personID] = max(
+            0,
+            (manuallyCorrectedFaceCountsByPersonID[face.personID] ?? 0) - (face.isManuallyCorrected ? 1 : 0)
+        )
+        rebuildAggregateIndex(for: face.personID)
+    }
+
+    private func moveFaceIndex(_ faceID: UUID, to personID: UUID, isManuallyCorrected: Bool? = nil) {
+        guard var face = facesByID[faceID] else { return }
+        let oldPersonID = face.personID
+        removeFaceFromPersonIndex(face)
+        face.personID = personID
+        if let isManuallyCorrected {
+            face.isManuallyCorrected = isManuallyCorrected
+        }
+        face.updatedAt = .now
+        facesByID[faceID] = face
+        addFaceToPersonIndex(face)
+        rebuildAggregateIndex(for: oldPersonID)
+        rebuildAggregateIndex(for: personID)
+    }
+
+    private func rebuildFaceIndexes() {
+        faceIDsByPersonID = [:]
+        assetIDsByPersonID = [:]
+        manuallyCorrectedFaceCountsByPersonID = [:]
+        representativeQualityByPersonID = [:]
+
+        for face in facesByID.values {
+            addFaceToPersonIndex(face)
+        }
+    }
+
+    private func rebuildAggregateIndex(for personID: UUID) {
+        guard let faceIDs = faceIDsByPersonID[personID], !faceIDs.isEmpty else {
+            faceIDsByPersonID[personID] = nil
+            assetIDsByPersonID[personID] = nil
+            manuallyCorrectedFaceCountsByPersonID[personID] = nil
+            representativeQualityByPersonID[personID] = nil
+            return
+        }
+
+        var assetIDs = Set<String>()
+        var manualCount = 0
+        var bestQuality: Float = 0
+        for faceID in faceIDs {
+            guard let face = facesByID[faceID] else { continue }
+            assetIDs.insert(face.assetLocalIdentifier)
+            if face.isManuallyCorrected {
+                manualCount += 1
+            }
+            bestQuality = max(bestQuality, score(face))
+        }
+        assetIDsByPersonID[personID] = assetIDs
+        manuallyCorrectedFaceCountsByPersonID[personID] = manualCount
+        representativeQualityByPersonID[personID] = bestQuality
     }
 
     private func rebuildAutomaticClusters(reason: String) {
@@ -677,11 +773,13 @@ final class FaceRecognitionStore {
             }
         }
 
+        var newAutomaticPersonIDs: [UUID] = []
         for component in components {
             let componentFaces = component.nodeIDs.compactMap { facesByID[$0] }
             guard !componentFaces.isEmpty else { continue }
 
             let personID = UUID()
+            newAutomaticPersonIDs.append(personID)
             let assetIDs = Set(componentFaces.map(\.assetLocalIdentifier))
             persons[personID] = StoredPerson(
                 id: personID,
@@ -694,6 +792,11 @@ final class FaceRecognitionStore {
                 facesByID[faceID]?.personID = personID
                 facesByID[faceID]?.updatedAt = .now
             }
+        }
+
+        rebuildFaceIndexes()
+
+        for personID in newAutomaticPersonIDs {
             recompute(personID: personID)
         }
 
@@ -880,7 +983,9 @@ final class FaceRecognitionStore {
 
     private func removeFaces(forAssetID assetID: String) {
         for faceID in faceIDsByAssetID[assetID] ?? [] {
-            if let personID = facesByID[faceID]?.personID {
+            if let face = facesByID[faceID] {
+                let personID = face.personID
+                removeFaceFromPersonIndex(face)
                 facesByID[faceID] = nil
                 recompute(personID: personID)
             }
@@ -889,8 +994,12 @@ final class FaceRecognitionStore {
     }
 
     private func deletePersonIfEmpty(_ personID: UUID) {
-        if !facesByID.values.contains(where: { $0.personID == personID }) {
+        if (faceIDsByPersonID[personID]?.isEmpty ?? true) {
             persons[personID] = nil
+            faceIDsByPersonID[personID] = nil
+            assetIDsByPersonID[personID] = nil
+            manuallyCorrectedFaceCountsByPersonID[personID] = nil
+            representativeQualityByPersonID[personID] = nil
         }
     }
 
@@ -908,6 +1017,7 @@ final class FaceRecognitionStore {
                 facesByID = Dictionary(uniqueKeysWithValues: snapshot.faces.map { ($0.id, $0) })
                 faceIDsByAssetID = snapshot.faceIDsByAssetID
                 indexRecords = snapshot.indexRecords
+                rebuildFaceIndexes()
                 rebuildAutomaticClusters(reason: "schema 11 complete-link clustering migration")
                 refreshPeople(persist: true, allowReorder: true)
                 lastIndexingSummary = "Face clustering was tightened to prevent chain-merged people. Picscry rebuilt automatic unknown people while preserving named people and manual corrections."
@@ -926,6 +1036,7 @@ final class FaceRecognitionStore {
             facesByID = Dictionary(uniqueKeysWithValues: snapshot.faces.map { ($0.id, $0) })
             faceIDsByAssetID = snapshot.faceIDsByAssetID
             indexRecords = snapshot.indexRecords
+            rebuildFaceIndexes()
             refreshPeople(persist: false, allowReorder: true)
             Diagnostics.shared.log("Loaded persisted face database with \(persons.count) people and \(facesByID.count) faces.")
         } catch {
@@ -939,6 +1050,10 @@ final class FaceRecognitionStore {
         persons = [:]
         facesByID = [:]
         faceIDsByAssetID = [:]
+        faceIDsByPersonID = [:]
+        assetIDsByPersonID = [:]
+        manuallyCorrectedFaceCountsByPersonID = [:]
+        representativeQualityByPersonID = [:]
         indexRecords = [:]
         try? FileManager.default.removeItem(at: url)
         refreshPeople(persist: false, allowReorder: true)

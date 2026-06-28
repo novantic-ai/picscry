@@ -28,6 +28,7 @@ struct FaceRecognitionConfiguration {
     var batchMergeIntervalFaceCount: Int = 150
     var fullMergeAfterIndexing = true
     var backgroundMergeEnabled = true
+    var incrementalClusterRebuildEnabled = false
     var embeddingCalibrationSampleCount: Int = 32
     var collapsedEmbeddingMedianSimilarityThreshold: Float = 0.90
     var collapsedEmbeddingMinimumSimilarityThreshold: Float = 0.75

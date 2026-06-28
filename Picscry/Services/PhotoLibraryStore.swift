@@ -370,13 +370,24 @@ final class PhotoLibraryStore: NSObject {
             return nil
         }
 
+        let startedAt = Date()
+        Diagnostics.shared.log("Face image request started for \(summary.id): asset \(summary.pixelWidth)x\(summary.pixelHeight), maxDimension \(Int(maxDimension.rounded())).")
+
+        if let localImage = await localRenderedImageForFaceProcessing(
+            asset: asset,
+            summary: summary,
+            maxDimension: maxDimension,
+            startedAt: startedAt
+        ) {
+            return localImage
+        }
+
         let options = PHImageRequestOptions()
         options.isNetworkAccessAllowed = true
         options.deliveryMode = .highQualityFormat
         options.resizeMode = .fast
         options.version = .current
-        let startedAt = Date()
-        Diagnostics.shared.log("Face image request started for \(summary.id): asset \(summary.pixelWidth)x\(summary.pixelHeight), maxDimension \(Int(maxDimension.rounded())).")
+        Diagnostics.shared.log("Face image local request unavailable for \(summary.id); falling back to PhotoKit image data request with network access.")
 
         return await withCheckedContinuation { continuation in
             let requestToken = ImageRequestToken()
@@ -432,6 +443,68 @@ final class PhotoLibraryStore: NSObject {
                     orientation: .up,
                     pixelWidth: cgImage.width,
                     pixelHeight: cgImage.height
+                ))
+            }
+        }
+    }
+
+    private func localRenderedImageForFaceProcessing(
+        asset: PHAsset,
+        summary: PhotoAssetSummary,
+        maxDimension: CGFloat,
+        startedAt: Date
+    ) async -> FaceProcessingImage? {
+        let options = PHImageRequestOptions()
+        options.isNetworkAccessAllowed = false
+        options.deliveryMode = .highQualityFormat
+        options.resizeMode = .fast
+        options.version = .current
+
+        let target = CGSize(width: maxDimension, height: maxDimension)
+        return await withCheckedContinuation { continuation in
+            var didResume = false
+
+            imageManager.requestImage(
+                for: asset,
+                targetSize: target,
+                contentMode: .aspectFit,
+                options: options
+            ) { image, info in
+                guard !didResume else { return }
+                if (info?[PHImageCancelledKey] as? Bool) == true {
+                    didResume = true
+                    continuation.resume(returning: nil)
+                    return
+                }
+                if let error = info?[PHImageErrorKey] as? Error {
+                    Diagnostics.shared.log("Face local image request failed for \(summary.id) after \(Self.durationText(since: startedAt)): \(error.localizedDescription)")
+                    didResume = true
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                let isInCloud = (info?[PHImageResultIsInCloudKey] as? Bool) ?? false
+                if isInCloud, image == nil {
+                    didResume = true
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                guard !isDegraded else { return }
+                didResume = true
+                guard let image,
+                      let normalized = Self.normalizedCGImageForFaceProcessing(from: image) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                Diagnostics.shared.log("Face image local request finished for \(summary.id) in \(Self.durationText(since: startedAt)): decoded \(normalized.width)x\(normalized.height), processing orientation up.")
+                continuation.resume(returning: FaceProcessingImage(
+                    image: UIImage(cgImage: normalized, scale: 1, orientation: .up),
+                    cgImage: normalized,
+                    orientation: .up,
+                    pixelWidth: normalized.width,
+                    pixelHeight: normalized.height
                 ))
             }
         }
@@ -1004,6 +1077,28 @@ final class PhotoLibraryStore: NSObject {
             return image
         }
         return UIImage(cgImage: cgImage, scale: image.scale, orientation: UIImage.Orientation(orientation))
+    }
+
+    private nonisolated static func normalizedCGImageForFaceProcessing(from image: UIImage) -> CGImage? {
+        if image.imageOrientation == .up, let cgImage = image.cgImage {
+            return cgImage
+        }
+
+        let pixelWidth = max(1, Int((image.size.width * image.scale).rounded()))
+        let pixelHeight = max(1, Int((image.size.height * image.scale).rounded()))
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(
+            size: CGSize(width: pixelWidth, height: pixelHeight),
+            format: format
+        )
+        let rendered = renderer.image { context in
+            UIColor.black.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
+            image.draw(in: CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
+        }
+        return rendered.cgImage
     }
 
     private nonisolated static func pixelSizeText(for image: UIImage) -> String {

@@ -176,6 +176,22 @@ final class FaceClusteringEngine {
         return accumulator.map { $0 / Float(totalCount) }.l2Normalized()
     }
 
+    func weightedCentroid(embeddings: [(embedding: [Float], weight: Float)]) -> [Float] {
+        guard let first = embeddings.first, !first.embedding.isEmpty else { return [] }
+        var accumulator = Array(repeating: Float(0), count: first.embedding.count)
+        var totalWeight: Float = 0
+
+        for item in embeddings where item.embedding.count == accumulator.count && item.weight.isFinite && item.weight > 0 {
+            for index in accumulator.indices {
+                accumulator[index] += item.embedding[index] * item.weight
+            }
+            totalWeight += item.weight
+        }
+
+        guard totalWeight > 0 else { return [] }
+        return accumulator.map { $0 / totalWeight }.l2Normalized()
+    }
+
     func canAutomaticallyMerge(left: FaceCluster, right: FaceCluster, similarity: Float) -> Bool {
         mergeDecision(
             left: left,
