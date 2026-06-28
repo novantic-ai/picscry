@@ -346,7 +346,7 @@ final class PicscryTests: XCTestCase {
         XCTAssertGreaterThan(merged[0], merged[1])
     }
 
-    func testConstrainedGraphClusteringKeepsSamePhotoFacesSeparate() {
+    func testConstrainedClusteringKeepsSamePhotoFacesSeparate() {
         let engine = FaceClusteringEngine()
         let firstSamePhoto = UUID()
         let secondSamePhoto = UUID()
@@ -359,11 +359,11 @@ final class PicscryTests: XCTestCase {
 
         let components = engine.constrainedComponents(for: nodes, similarityThreshold: 0.92)
 
-        XCTAssertEqual(components.count, 2)
+        XCTAssertEqual(components.count, 3)
         XCTAssertFalse(components.contains { component in
             component.nodeIDs.contains(firstSamePhoto) && component.nodeIDs.contains(secondSamePhoto)
         })
-        XCTAssertTrue(components.contains { $0.nodeIDs.count == 2 && $0.nodeIDs.contains(laterMatch) })
+        XCTAssertTrue(components.contains { $0.nodeIDs.contains(laterMatch) })
     }
 
     func testIncrementalConstrainedClusteringKeepsSamePhotoFacesSeparate() {
@@ -389,23 +389,32 @@ final class PicscryTests: XCTestCase {
         XCTAssertTrue(components.contains { $0.nodeIDs.contains(laterMatch) })
     }
 
-    func testRebuildMergePassMergesSamePersonChain() {
+    func testConstrainedClusteringDoesNotMergeThroughWeakTransitiveChain() {
         let engine = FaceClusteringEngine()
         let first = UUID()
         let second = UUID()
         let third = UUID()
-        let angle = acos(Float(0.82))
+        let angle = acos(Float(0.72))
         let nodes = [
             FaceClusteringObservationNode(id: first, assetLocalIdentifier: "asset-a", embedding: [1, 0, 0]),
             FaceClusteringObservationNode(id: second, assetLocalIdentifier: "asset-b", embedding: [cos(angle), sin(angle), 0]),
             FaceClusteringObservationNode(id: third, assetLocalIdentifier: "asset-c", embedding: [cos(angle * 2), sin(angle * 2), 0])
         ]
 
-        let initial = engine.constrainedComponents(for: nodes, similarityThreshold: 0.80)
-        let merged = engine.mergedConstrainedComponents(from: initial, nodes: nodes, mergeThreshold: 0.79)
+        let components = engine.constrainedComponents(for: nodes, similarityThreshold: 0.66)
 
-        XCTAssertEqual(merged.count, 1)
-        XCTAssertEqual(Set(merged[0].nodeIDs), Set([first, second, third]))
+        XCTAssertEqual(components.count, 2)
+        XCTAssertFalse(components.contains { component in
+            component.nodeIDs.contains(first) && component.nodeIDs.contains(third)
+        })
+
+        let mergeResult = engine.mergedConstrainedComponentResult(
+            from: components,
+            nodes: nodes,
+            mergeThreshold: 0.68
+        )
+
+        XCTAssertEqual(mergeResult.components.count, 2)
     }
 
     func testMergePassKeepsSamePhotoFacesSeparate() {

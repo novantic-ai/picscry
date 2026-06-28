@@ -243,23 +243,11 @@ final class FaceClusteringEngine {
         for nodes: [FaceClusteringObservationNode],
         similarityThreshold: Float
     ) -> [FaceClusteringComponent] {
-        guard !nodes.isEmpty else { return [] }
-        var unionFind = CannotLinkUnionFind(nodes: nodes)
-
-        for leftIndex in nodes.indices {
-            for rightIndex in nodes.indices where rightIndex > leftIndex {
-                guard nodes[leftIndex].assetLocalIdentifier != nodes[rightIndex].assetLocalIdentifier else {
-                    continue
-                }
-
-                let similarity = nodes[leftIndex].embedding.cosineSimilarity(to: nodes[rightIndex].embedding)
-                if similarity >= similarityThreshold {
-                    unionFind.unionIfAllowed(leftIndex, rightIndex)
-                }
-            }
-        }
-
-        return unionFind.components()
+        constrainedIncrementalComponents(
+            for: nodes,
+            similarityThreshold: similarityThreshold,
+            singleSampleThreshold: configuration.graphEdgeSimilarityThresholdForSingleSample
+        )
     }
 
     func constrainedIncrementalComponents(
@@ -298,7 +286,13 @@ final class FaceClusteringEngine {
             let secondSimilarity = ranked.dropFirst().first?.similarity
             if let best = ranked.first,
                best.similarity >= threshold,
-               isHealthyMargin(bestSimilarity: best.similarity, secondSimilarity: secondSimilarity) {
+               isHealthyMargin(bestSimilarity: best.similarity, secondSimilarity: secondSimilarity),
+               canJoinCompleteLink(
+                node: node,
+                componentIndexes: components[best.componentIndex].nodeIndexes,
+                nodes: nodes,
+                threshold: threshold
+               ) {
                 let componentIndex = best.componentIndex
                 components[componentIndex].nodeIndexes.append(index)
                 components[componentIndex].assetIDs.insert(node.assetLocalIdentifier)
@@ -473,66 +467,16 @@ final class FaceClusteringEngine {
             bestSecondBestMargin: nil
         )
     }
-}
 
-private struct CannotLinkUnionFind {
-    private var parents: [Int]
-    private var ranks: [Int]
-    private var assetIDsByRoot: [Set<String>]
-    private let nodes: [FaceClusteringObservationNode]
-
-    init(nodes: [FaceClusteringObservationNode]) {
-        self.nodes = nodes
-        parents = Array(nodes.indices)
-        ranks = Array(repeating: 0, count: nodes.count)
-        assetIDsByRoot = nodes.map { [$0.assetLocalIdentifier] }
-    }
-
-    mutating func unionIfAllowed(_ leftIndex: Int, _ rightIndex: Int) {
-        let leftRoot = find(leftIndex)
-        let rightRoot = find(rightIndex)
-        guard leftRoot != rightRoot else { return }
-        guard assetIDsByRoot[leftRoot].isDisjoint(with: assetIDsByRoot[rightRoot]) else { return }
-
-        if ranks[leftRoot] < ranks[rightRoot] {
-            parents[leftRoot] = rightRoot
-            assetIDsByRoot[rightRoot].formUnion(assetIDsByRoot[leftRoot])
-        } else if ranks[leftRoot] > ranks[rightRoot] {
-            parents[rightRoot] = leftRoot
-            assetIDsByRoot[leftRoot].formUnion(assetIDsByRoot[rightRoot])
-        } else {
-            parents[rightRoot] = leftRoot
-            ranks[leftRoot] += 1
-            assetIDsByRoot[leftRoot].formUnion(assetIDsByRoot[rightRoot])
+    private func canJoinCompleteLink(
+        node: FaceClusteringObservationNode,
+        componentIndexes: [Int],
+        nodes: [FaceClusteringObservationNode],
+        threshold: Float
+    ) -> Bool {
+        componentIndexes.allSatisfy { existingIndex in
+            node.embedding.cosineSimilarity(to: nodes[existingIndex].embedding) >= threshold
         }
-    }
-
-    mutating func components() -> [FaceClusteringComponent] {
-        var indexesByRoot: [Int: [Int]] = [:]
-        for index in nodes.indices {
-            indexesByRoot[find(index), default: []].append(index)
-        }
-
-        return indexesByRoot.values
-            .map { indexes in
-                FaceClusteringComponent(nodeIDs: indexes.sorted().map { nodes[$0].id })
-            }
-            .sorted { lhs, rhs in
-                guard let leftFirst = lhs.nodeIDs.first,
-                      let rightFirst = rhs.nodeIDs.first,
-                      let leftIndex = nodes.firstIndex(where: { $0.id == leftFirst }),
-                      let rightIndex = nodes.firstIndex(where: { $0.id == rightFirst }) else {
-                    return lhs.nodeIDs.count > rhs.nodeIDs.count
-                }
-                return leftIndex < rightIndex
-            }
-    }
-
-    private mutating func find(_ index: Int) -> Int {
-        if parents[index] != index {
-            parents[index] = find(parents[index])
-        }
-        return parents[index]
     }
 }
 

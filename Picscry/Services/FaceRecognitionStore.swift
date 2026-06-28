@@ -656,7 +656,7 @@ final class FaceRecognitionStore {
                     for: nodes,
                     similarityThreshold: configuration.graphEdgeSimilarityThreshold
                 )
-                Diagnostics.shared.log("Face clustering rebuild using all-pairs graph (\(reason)): observations \(nodes.count), threshold \(configuration.graphEdgeSimilarityThreshold).")
+                Diagnostics.shared.log("Face clustering rebuild using complete-link constrained clustering (\(reason)): observations \(nodes.count), threshold \(configuration.graphEdgeSimilarityThreshold).")
             } else {
                 initialComponents = clusteringEngine.constrainedIncrementalComponents(
                     for: nodes,
@@ -733,6 +733,7 @@ final class FaceRecognitionStore {
         return FaceClusteringDiagnosticsSnapshot(
             generatedAt: Date(),
             reason: reason,
+            clusteringAlgorithm: "complete-link constrained clustering",
             thresholdProfile: FaceThresholdDiagnostics(
                 possibleMatchThreshold: configuration.possibleMatchThreshold,
                 autoMatchThreshold: configuration.autoMatchThreshold,
@@ -902,15 +903,15 @@ final class FaceRecognitionStore {
         do {
             let data = try Data(contentsOf: url)
             let snapshot = try JSONDecoder().decode(FaceDatabaseSnapshot.self, from: data)
-            if [7, 8, 9].contains(snapshot.schemaVersion), FaceDatabaseSchema.currentVersion == 10 {
+            if [7, 8, 9, 10].contains(snapshot.schemaVersion), FaceDatabaseSchema.currentVersion == 11 {
                 persons = Dictionary(uniqueKeysWithValues: snapshot.persons.map { ($0.id, $0) })
                 facesByID = Dictionary(uniqueKeysWithValues: snapshot.faces.map { ($0.id, $0) })
                 faceIDsByAssetID = snapshot.faceIDsByAssetID
                 indexRecords = snapshot.indexRecords
-                rebuildAutomaticClusters(reason: "schema 10 precision threshold migration")
+                rebuildAutomaticClusters(reason: "schema 11 complete-link clustering migration")
                 refreshPeople(persist: true, allowReorder: true)
-                lastIndexingSummary = "Face clustering thresholds were tightened. Picscry rebuilt automatic unknown people while preserving named people and manual corrections."
-                Diagnostics.shared.log("Migrated face database schema \(snapshot.schemaVersion) to 10 with precision-first thresholds. People \(persons.count), faces \(facesByID.count).")
+                lastIndexingSummary = "Face clustering was tightened to prevent chain-merged people. Picscry rebuilt automatic unknown people while preserving named people and manual corrections."
+                Diagnostics.shared.log("Migrated face database schema \(snapshot.schemaVersion) to 11 with complete-link clustering. People \(persons.count), faces \(facesByID.count).")
                 return
             }
 
@@ -997,7 +998,7 @@ final class FaceRecognitionStore {
 }
 
 private enum FaceDatabaseSchema {
-    static let currentVersion = 10
+    static let currentVersion = 11
 }
 
 private struct FaceThresholdDiagnostics: Codable {
@@ -1024,6 +1025,7 @@ private struct FaceAssignmentDecisionCounts: Codable {
 private struct FaceClusteringDiagnosticsSnapshot: Codable {
     let generatedAt: Date
     let reason: String
+    let clusteringAlgorithm: String
     let thresholdProfile: FaceThresholdDiagnostics
     let totalFaces: Int
     let totalPeopleClusters: Int
