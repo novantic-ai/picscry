@@ -33,7 +33,11 @@ actor FaceEmbeddingService {
         model != nil
     }
 
-    func embedding(for faceImage: CGImage, debugIdentifier: String? = nil) async throws -> [Float] {
+    func embedding(
+        for faceImage: CGImage,
+        debugIdentifier: String? = nil,
+        debugMetadata: FaceEmbeddingDebugMetadata? = nil
+    ) async throws -> [Float] {
         guard let model else {
             throw FaceEmbeddingServiceError.modelUnavailable
         }
@@ -79,7 +83,8 @@ actor FaceEmbeddingService {
             faceImage: faceImage,
             rawEmbedding: raw,
             normalizedEmbedding: normalized,
-            debugIdentifier: debugIdentifier
+            debugIdentifier: debugIdentifier,
+            debugMetadata: debugMetadata
         )
         return normalized
     }
@@ -329,7 +334,8 @@ actor FaceEmbeddingService {
         faceImage: CGImage,
         rawEmbedding: [Float],
         normalizedEmbedding: [Float],
-        debugIdentifier: String?
+        debugIdentifier: String?,
+        debugMetadata: FaceEmbeddingDebugMetadata?
     ) {
         guard debugExportCount < 20 else { return }
         debugExportCount += 1
@@ -348,6 +354,7 @@ actor FaceEmbeddingService {
         let vectorURL = directory.appendingPathComponent("\(prefix).json")
         let payload = FaceEmbeddingDebugPayload(
             debugIdentifier: debugIdentifier,
+            debugMetadata: debugMetadata,
             rawEmbedding: rawEmbedding,
             normalizedEmbedding: normalizedEmbedding
         )
@@ -436,6 +443,7 @@ private struct FinalChannelStats {
 
 private struct FaceEmbeddingDebugPayload: Encodable {
     let debugIdentifier: String?
+    let debugMetadata: FaceEmbeddingDebugMetadata?
     let rawEmbedding: [Float]
     let normalizedEmbedding: [Float]
 }

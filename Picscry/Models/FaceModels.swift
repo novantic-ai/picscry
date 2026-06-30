@@ -80,6 +80,30 @@ struct PhotoFaceSummary: Identifiable, Hashable {
     let isManuallyCorrected: Bool
 }
 
+enum FaceDetectionBackend: String, Codable, Hashable, CaseIterable {
+    case yunet
+    case visionFallback
+}
+
+struct FaceLandmarkFivePoint: Codable, Hashable {
+    let rightEye: CGPoint
+    let leftEye: CGPoint
+    let noseTip: CGPoint
+    let rightMouth: CGPoint
+    let leftMouth: CGPoint
+
+    var sfaceSourcePoints: [CGPoint] {
+        [rightEye, leftEye, noseTip, rightMouth, leftMouth]
+    }
+}
+
+struct FaceEmbeddingDebugMetadata: Encodable {
+    let detectorBackend: FaceDetectionBackend
+    let detectorRow: [Float]?
+    let alignmentMethod: FaceAlignmentMethod
+    let alignmentQuality: Float
+}
+
 struct FaceObservationInput {
     let assetLocalIdentifier: String
     let assetModificationDate: Date?
@@ -89,8 +113,40 @@ struct FaceObservationInput {
     let leftToRightIndex: Int
     let detectionConfidence: Float
     let faceQuality: Float?
+    let detectorBackend: FaceDetectionBackend
+    let detectorRow: [Float]?
     let embedding: [Float]
     let faceCropImageData: Data?
+}
+
+enum FaceIndexingRunContext: String, Codable {
+    case foreground
+    case manualRefresh
+    case backgroundTask
+}
+
+enum FaceIndexingWorkerPolicy {
+    static func workerLimit(
+        context: FaceIndexingRunContext,
+        thermalState: ProcessInfo.ThermalState = ProcessInfo.processInfo.thermalState,
+        isLowPowerModeEnabled: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled,
+        processorCount: Int = ProcessInfo.processInfo.processorCount
+    ) -> Int {
+        if context == .backgroundTask ||
+            isLowPowerModeEnabled ||
+            thermalState == .serious ||
+            thermalState == .critical {
+            return 1
+        }
+
+        if (context == .foreground || context == .manualRefresh),
+           (thermalState == .nominal || thermalState == .fair),
+           processorCount >= 6 {
+            return 3
+        }
+
+        return 2
+    }
 }
 
 enum FaceIndexingState: Equatable {

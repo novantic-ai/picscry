@@ -1,6 +1,5 @@
 import CoreGraphics
 import UIKit
-import Vision
 
 struct FaceCropResult {
     let modelInputImage: CGImage
@@ -162,15 +161,16 @@ final class FaceCropService {
         detectedFace: DetectedFace,
         imageSize: CGSize
     ) -> (image: CGImage, quality: Float, method: FaceAlignmentMethod)? {
-        guard let landmarks = detectedFace.landmarks,
-              let leftEye = landmarks.leftEye,
-              let rightEye = landmarks.rightEye,
-              let leftCenter = landmarkCenter(leftEye, faceBox: detectedFace.normalizedBoundingBox, imageSize: imageSize),
-              let rightCenter = landmarkCenter(rightEye, faceBox: detectedFace.normalizedBoundingBox, imageSize: imageSize),
-              let mouthCenter = mouthCenter(from: landmarks, faceBox: detectedFace.normalizedBoundingBox, imageSize: imageSize) else {
+        guard let landmarks = detectedFace.landmarks else {
             return nil
         }
 
+        let leftCenter = landmarks.leftEye
+        let rightCenter = landmarks.rightEye
+        let mouthCenter = CGPoint(
+            x: (landmarks.leftMouth.x + landmarks.rightMouth.x) / 2,
+            y: (landmarks.leftMouth.y + landmarks.rightMouth.y) / 2
+        )
         let sourceEyeDelta = CGPoint(x: rightCenter.x - leftCenter.x, y: rightCenter.y - leftCenter.y)
         let sourceEyeDistance = hypot(sourceEyeDelta.x, sourceEyeDelta.y)
         guard sourceEyeDistance.isFinite, sourceEyeDistance > 1 else { return nil }
@@ -230,16 +230,16 @@ final class FaceCropService {
         detectedFace: DetectedFace,
         imageSize: CGSize
     ) -> (image: CGImage, quality: Float, method: FaceAlignmentMethod)? {
-        guard let landmarks = detectedFace.landmarks,
-              let fivePointLandmarks = sfaceFiveLandmarks(
-                from: landmarks,
-                faceBox: detectedFace.normalizedBoundingBox,
-                imageSize: imageSize
-              ) else {
+        guard let landmarks = detectedFace.landmarks else {
             return nil
         }
 
-        let candidates = fivePointLandmarks.candidateSourceOrders()
+        let candidates: [(label: String, points: [CGPoint])]
+        if detectedFace.backend == .visionFallback {
+            candidates = FaceLandmarkFivePointSet(landmarks: landmarks).candidateSourceOrders()
+        } else {
+            candidates = [("yunetOpenCVOrder", landmarks.sfaceSourcePoints)]
+        }
         var bestCandidate: (transform: CGAffineTransform, error: CGFloat, label: String)?
 
         for candidate in candidates {
@@ -315,107 +315,6 @@ final class FaceCropService {
         return context.makeImage()
     }
 
-    private static func mouthCenter(
-        from landmarks: VNFaceLandmarks2D,
-        faceBox: CGRect,
-        imageSize: CGSize
-    ) -> CGPoint? {
-        if let outerLips = landmarks.outerLips, outerLips.pointCount > 0 {
-            return landmarkCenter(outerLips, faceBox: faceBox, imageSize: imageSize)
-        }
-        if let innerLips = landmarks.innerLips, innerLips.pointCount > 0 {
-            return landmarkCenter(innerLips, faceBox: faceBox, imageSize: imageSize)
-        }
-        return nil
-    }
-
-    private static func sfaceFiveLandmarks(
-        from landmarks: VNFaceLandmarks2D,
-        faceBox: CGRect,
-        imageSize: CGSize
-    ) -> FaceLandmarkFivePointSet? {
-        guard let visionLeftEye = landmarks.leftEye,
-              let visionRightEye = landmarks.rightEye,
-              let eyeA = landmarkCenter(visionRightEye, faceBox: faceBox, imageSize: imageSize),
-              let eyeB = landmarkCenter(visionLeftEye, faceBox: faceBox, imageSize: imageSize),
-              let noseTip = noseTip(from: landmarks, faceBox: faceBox, imageSize: imageSize),
-              let mouthCorners = mouthCorners(from: landmarks, faceBox: faceBox, imageSize: imageSize) else {
-            return nil
-        }
-
-        return FaceLandmarkFivePointSet(
-            eyeA: eyeA,
-            eyeB: eyeB,
-            noseTip: noseTip,
-            mouthA: mouthCorners.left,
-            mouthB: mouthCorners.right
-        )
-    }
-
-    private static func noseTip(
-        from landmarks: VNFaceLandmarks2D,
-        faceBox: CGRect,
-        imageSize: CGSize
-    ) -> CGPoint? {
-        if let noseCrest = landmarks.noseCrest,
-           let bottom = landmarkPoints(noseCrest, faceBox: faceBox, imageSize: imageSize).max(by: { $0.y < $1.y }) {
-            return bottom
-        }
-        if let nose = landmarks.nose,
-           let bottom = landmarkPoints(nose, faceBox: faceBox, imageSize: imageSize).max(by: { $0.y < $1.y }) {
-            return bottom
-        }
-        return nil
-    }
-
-    private static func mouthCorners(
-        from landmarks: VNFaceLandmarks2D,
-        faceBox: CGRect,
-        imageSize: CGSize
-    ) -> (left: CGPoint, right: CGPoint)? {
-        let region = landmarks.outerLips ?? landmarks.innerLips
-        guard let region else { return nil }
-        let points = landmarkPoints(region, faceBox: faceBox, imageSize: imageSize)
-        guard let left = points.min(by: { $0.x < $1.x }),
-              let right = points.max(by: { $0.x < $1.x }) else {
-            return nil
-        }
-        return (left, right)
-    }
-
-    private static func landmarkCenter(
-        _ region: VNFaceLandmarkRegion2D,
-        faceBox: CGRect,
-        imageSize: CGSize
-    ) -> CGPoint? {
-        guard region.pointCount > 0 else { return nil }
-        let points = region.normalizedPoints
-        let sum = points.reduce(CGPoint.zero) { partial, point in
-            CGPoint(x: partial.x + CGFloat(point.x), y: partial.y + CGFloat(point.y))
-        }
-        let average = CGPoint(
-            x: sum.x / CGFloat(region.pointCount),
-            y: sum.y / CGFloat(region.pointCount)
-        )
-        return CGPoint(
-            x: (faceBox.minX + (average.x * faceBox.width)) * imageSize.width,
-            y: (1 - (faceBox.minY + (average.y * faceBox.height))) * imageSize.height
-        )
-    }
-
-    private static func landmarkPoints(
-        _ region: VNFaceLandmarkRegion2D,
-        faceBox: CGRect,
-        imageSize: CGSize
-    ) -> [CGPoint] {
-        region.normalizedPoints.map { point in
-            CGPoint(
-                x: (faceBox.minX + (CGFloat(point.x) * faceBox.width)) * imageSize.width,
-                y: (1 - (faceBox.minY + (CGFloat(point.y) * faceBox.height))) * imageSize.height
-            )
-        }
-    }
-
     private static let opencvSFaceDestinationLandmarks: [CGPoint] = [
         CGPoint(x: 38.2946, y: 51.6963),
         CGPoint(x: 73.5318, y: 51.5014),
@@ -480,18 +379,26 @@ final class FaceCropService {
 }
 
 private struct FaceLandmarkFivePointSet {
-    let eyeA: CGPoint
-    let eyeB: CGPoint
+    let rightEye: CGPoint
+    let leftEye: CGPoint
     let noseTip: CGPoint
-    let mouthA: CGPoint
-    let mouthB: CGPoint
+    let rightMouth: CGPoint
+    let leftMouth: CGPoint
+
+    init(landmarks: FaceLandmarkFivePoint) {
+        rightEye = landmarks.rightEye
+        leftEye = landmarks.leftEye
+        noseTip = landmarks.noseTip
+        rightMouth = landmarks.rightMouth
+        leftMouth = landmarks.leftMouth
+    }
 
     func candidateSourceOrders() -> [(label: String, points: [CGPoint])] {
         [
-            ("candidateA", [eyeA, eyeB, noseTip, mouthA, mouthB]),
-            ("candidateB", [eyeB, eyeA, noseTip, mouthA, mouthB]),
-            ("candidateC", [eyeA, eyeB, noseTip, mouthB, mouthA]),
-            ("candidateD", [eyeB, eyeA, noseTip, mouthB, mouthA])
+            ("candidateA", [rightEye, leftEye, noseTip, rightMouth, leftMouth]),
+            ("candidateB", [leftEye, rightEye, noseTip, rightMouth, leftMouth]),
+            ("candidateC", [rightEye, leftEye, noseTip, leftMouth, rightMouth]),
+            ("candidateD", [leftEye, rightEye, noseTip, leftMouth, rightMouth])
         ]
     }
 }

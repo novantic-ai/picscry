@@ -115,7 +115,8 @@ final class FaceRecognitionStore {
         let pending = assets.filter { assetNeedsIndex($0) }
         let alreadyIndexedCount = max(0, totalEligibleImageCount - pending.count)
         guard !pending.isEmpty else {
-            if configuration.backgroundMergeEnabled {
+            let unclusteredCount = unclusteredObservationCount()
+            if configuration.backgroundMergeEnabled || unclusteredCount > 0 {
                 rebuildAutomaticClusters(reason: "no pending photos after \(reason)")
             }
             refreshPeople(persist: true, allowReorder: true)
@@ -211,9 +212,11 @@ final class FaceRecognitionStore {
         guard let original = facesByID[faceID], persons[personID] != nil else { return }
         let oldPersonID = original.personID
         moveFaceIndex(faceID, to: personID, isManuallyCorrected: true)
-        recompute(personID: oldPersonID)
+        if let oldPersonID {
+            recompute(personID: oldPersonID)
+            deletePersonIfEmpty(oldPersonID)
+        }
         recompute(personID: personID)
-        deletePersonIfEmpty(oldPersonID)
         refreshPeople()
     }
 
@@ -228,18 +231,20 @@ final class FaceRecognitionStore {
             isProvisional: false
         )
         moveFaceIndex(faceID, to: newPersonID, isManuallyCorrected: true)
-        recompute(personID: oldPersonID)
+        if let oldPersonID {
+            recompute(personID: oldPersonID)
+            deletePersonIfEmpty(oldPersonID)
+        }
         recompute(personID: newPersonID)
-        deletePersonIfEmpty(oldPersonID)
         refreshPeople()
     }
 
     func markFaceIncorrect(_ faceID: UUID) async {
-        guard var face = facesByID[faceID] else { return }
+        guard var face = facesByID[faceID], let personID = face.personID else { return }
         face.isManuallyCorrected = true
         facesByID[faceID] = face
-        rebuildAggregateIndex(for: face.personID)
-        recompute(personID: face.personID)
+        rebuildAggregateIndex(for: personID)
+        recompute(personID: personID)
         refreshPeople()
     }
 
@@ -261,35 +266,16 @@ final class FaceRecognitionStore {
         var processedOverall = alreadyIndexedCount
         indexingState = .indexing(processed: processedOverall, total: totalEligibleImageCount)
         currentIndexingMessage = "Starting face indexing..."
-
-        for (offset, asset) in pending.enumerated() {
+        let extractionStartedAt = Date()
+        let runContext = indexingRunContext(for: reason)
+        let workers = (0..<3).map { FaceIndexingWorker(id: $0 + 1, configuration: configuration) }
+        var chunkStart = pending.startIndex
+        while chunkStart < pending.endIndex {
             guard activeIndexingRunID == runID else {
-                Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Ignoring stale face indexing run before processing \(asset.id).")
+                Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Ignoring stale face indexing run before chunk \(chunkStart).")
                 return
             }
             guard !Task.isCancelled else {
-                indexingState = .paused
-                currentIndexingMessage = "Face indexing paused at \(processedOverall) of \(totalEligibleImageCount)."
-                savePersistedState()
-                Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face indexing run cancelled (\(reason)) at \(processedOverall) of \(totalEligibleImageCount) photos in \(Self.durationText(since: indexingStartedAt)).")
-                return
-            }
-
-            let assetStartedAt = Date()
-            currentIndexingMessage = "Processing photo \(min(processedOverall + 1, totalEligibleImageCount)) of \(totalEligibleImageCount)"
-            Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face indexing asset \(offset + 1)/\(pending.count) started: \(asset.id), pixels \(asset.pixelWidth)x\(asset.pixelHeight), modified \(asset.modificationDate?.description ?? "unknown").")
-
-            do {
-                let result = try await process(asset: asset, photoLibraryStore: photoLibraryStore)
-                guard activeIndexingRunID == runID else {
-                    Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Ignoring stale face indexing run after processing \(asset.id).")
-                    return
-                }
-                try Task.checkCancellation()
-                performanceMetrics.record(result)
-                saveAndCluster(result.observations, asset: asset)
-                Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face indexing asset \(offset + 1)/\(pending.count) finished in \(Self.durationText(since: assetStartedAt)): \(asset.id), saved \(result.observations.count) face observations.")
-            } catch is CancellationError {
                 indexingState = .paused
                 currentIndexingMessage = "Face indexing paused at \(processedOverall) of \(totalEligibleImageCount)."
                 savePersistedState()
@@ -297,46 +283,100 @@ final class FaceRecognitionStore {
                     reason: reason,
                     completed: false,
                     duration: Date().timeIntervalSince(indexingStartedAt),
+                    extractionDuration: Date().timeIntervalSince(extractionStartedAt),
+                    clusteringDuration: 0,
                     totalFaces: facesByID.count,
-                    visiblePeople: people.count
+                    visiblePeople: people.count,
+                    unclusteredObservationCount: unclusteredObservationCount()
                 ))
-                Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face indexing cancelled while processing \(asset.id); not recording index record.")
+                Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face indexing run cancelled (\(reason)) at \(processedOverall) of \(totalEligibleImageCount) photos in \(Self.durationText(since: indexingStartedAt)).")
                 return
-            } catch {
-                Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face indexing failed for \(asset.id): \(error.localizedDescription)")
             }
 
-            processedThisRun += 1
-            processedOverall = min(totalEligibleImageCount, alreadyIndexedCount + processedThisRun)
-            indexingState = .indexing(processed: processedOverall, total: totalEligibleImageCount)
-            if processedThisRun == 1 || processedThisRun.isMultiple(of: 10) {
-                currentIndexingMessage = "Indexed \(processedOverall) of \(totalEligibleImageCount) photos"
-                Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face indexing progress (\(reason)): \(processedOverall)/\(totalEligibleImageCount) photos in \(Self.durationText(since: indexingStartedAt)).")
+            let workerLimit = FaceIndexingWorkerPolicy.workerLimit(context: runContext)
+            performanceMetrics.recordWorkerLimit(workerLimit, processedImageCount: processedThisRun)
+            let chunkEnd = min(pending.endIndex, chunkStart + 25)
+            let chunk = Array(pending[chunkStart..<chunkEnd].enumerated().map { localOffset, asset in
+                PendingFaceIndexingAsset(offset: chunkStart + localOffset, asset: asset)
+            })
+            currentIndexingMessage = "Extracting faces \(processedOverall + 1)-\(min(totalEligibleImageCount, alreadyIndexedCount + processedThisRun + chunk.count)) of \(totalEligibleImageCount)"
+            Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face extraction chunk \(chunkStart + 1)-\(chunkEnd) using \(workerLimit) workers.")
+
+            let completions = await processExtractionChunk(
+                chunk,
+                workerLimit: workerLimit,
+                workers: workers,
+                photoLibraryStore: photoLibraryStore
+            )
+
+            for completion in completions {
+                guard activeIndexingRunID == runID else {
+                    Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Ignoring stale face indexing run after processing \(completion.asset.id).")
+                    return
+                }
+
+                switch completion.result {
+                case let .success(result):
+                    performanceMetrics.record(result)
+                    saveExtractedObservations(result.observations, asset: completion.asset)
+                    Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face extraction asset \(completion.offset + 1)/\(pending.count) finished: \(completion.asset.id), saved \(result.observations.count) unclustered observations.")
+                case let .failure(error as CancellationError):
+                    indexingState = .paused
+                    currentIndexingMessage = "Face indexing paused at \(processedOverall) of \(totalEligibleImageCount)."
+                    savePersistedState()
+                    saveIndexingPerformanceDiagnostics(performanceMetrics.snapshot(
+                        reason: reason,
+                        completed: false,
+                        duration: Date().timeIntervalSince(indexingStartedAt),
+                        extractionDuration: Date().timeIntervalSince(extractionStartedAt),
+                        clusteringDuration: 0,
+                        totalFaces: facesByID.count,
+                        visiblePeople: people.count,
+                        unclusteredObservationCount: unclusteredObservationCount()
+                    ))
+                    Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face indexing cancelled while processing \(completion.asset.id); not recording index record. \(error.localizedDescription)")
+                    return
+                case let .failure(error):
+                    Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face indexing failed for \(completion.asset.id): \(error.localizedDescription)")
+                }
+
+                processedThisRun += 1
+                processedOverall = min(totalEligibleImageCount, alreadyIndexedCount + processedThisRun)
+                indexingState = .indexing(processed: processedOverall, total: totalEligibleImageCount)
+                if processedThisRun == 1 || processedThisRun.isMultiple(of: 10) {
+                    currentIndexingMessage = "Extracted faces from \(processedOverall) of \(totalEligibleImageCount) photos"
+                    Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face extraction progress (\(reason)): \(processedOverall)/\(totalEligibleImageCount) photos in \(Self.durationText(since: indexingStartedAt)).")
+                }
+
+                if processedThisRun.isMultiple(of: configuration.peopleRefreshBatchSize) {
+                    refreshPeople(persist: false, allowReorder: false)
+                }
+
+                if processedThisRun.isMultiple(of: configuration.databaseSaveBatchSize) {
+                    savePersistedState()
+                }
             }
 
-            if processedThisRun.isMultiple(of: configuration.peopleRefreshBatchSize) {
-                refreshPeople(persist: false, allowReorder: false)
-            }
-
-            if processedThisRun.isMultiple(of: configuration.indexingBatchSize) {
-                await Task.yield()
-            }
-
-            if processedThisRun.isMultiple(of: configuration.databaseSaveBatchSize) {
-                savePersistedState()
-            }
+            chunkStart = chunkEnd
+            await Task.yield()
         }
 
+        let extractionDuration = Date().timeIntervalSince(extractionStartedAt)
+        let clusteringStartedAt = Date()
         if configuration.fullMergeAfterIndexing {
             rebuildAutomaticClusters(reason: "indexing finished")
         }
+        let clusteringDuration = Date().timeIntervalSince(clusteringStartedAt)
         refreshPeople(persist: true, allowReorder: true)
         saveIndexingPerformanceDiagnostics(performanceMetrics.snapshot(
             reason: reason,
             completed: true,
             duration: Date().timeIntervalSince(indexingStartedAt),
+            extractionDuration: extractionDuration,
+            clusteringDuration: clusteringDuration,
             totalFaces: facesByID.count,
-            visiblePeople: people.count
+            visiblePeople: people.count,
+            unclusteredObservationCount: unclusteredObservationCount()
         ))
         indexingState = .idle
         activeIndexingRunID = nil
@@ -344,6 +384,66 @@ final class FaceRecognitionStore {
         currentIndexingMessage = nil
         lastIndexingSummary = "Indexed \(processedThisRun) photos in \(Self.durationText(since: indexingStartedAt)). \(facesByID.count) faces across \(people.count) people."
         Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face indexing finished (\(reason)) at \(processedOverall)/\(totalEligibleImageCount) photos in \(Self.durationText(since: indexingStartedAt)) with \(facesByID.count) face observations across \(people.count) people.")
+    }
+
+    private func processExtractionChunk(
+        _ chunk: [PendingFaceIndexingAsset],
+        workerLimit: Int,
+        workers: [FaceIndexingWorker],
+        photoLibraryStore: PhotoLibraryStore
+    ) async -> [FaceIndexingWorkerCompletion] {
+        guard !chunk.isEmpty else { return [] }
+        var completions: [FaceIndexingWorkerCompletion] = []
+        completions.reserveCapacity(chunk.count)
+        var nextIndex = 0
+        let activeWorkerCount = min(workerLimit, workers.count, chunk.count)
+
+        await withTaskGroup(of: FaceIndexingWorkerCompletion.self) { group in
+            func enqueue(workerIndex: Int) {
+                guard nextIndex < chunk.count else { return }
+                let pendingAsset = chunk[nextIndex]
+                let worker = workers[workerIndex]
+                nextIndex += 1
+                group.addTask {
+                    let result: Result<FaceAssetProcessingResult, Error>
+                    do {
+                        result = .success(try await worker.process(
+                            asset: pendingAsset.asset,
+                            photoLibraryStore: photoLibraryStore
+                        ))
+                    } catch {
+                        result = .failure(error)
+                    }
+                    return FaceIndexingWorkerCompletion(
+                        workerIndex: workerIndex,
+                        offset: pendingAsset.offset,
+                        asset: pendingAsset.asset,
+                        result: result
+                    )
+                }
+            }
+
+            for workerIndex in 0..<activeWorkerCount {
+                enqueue(workerIndex: workerIndex)
+            }
+
+            while let completion = await group.next() {
+                completions.append(completion)
+                enqueue(workerIndex: completion.workerIndex)
+            }
+        }
+
+        return completions.sorted { $0.offset < $1.offset }
+    }
+
+    private func indexingRunContext(for reason: String) -> FaceIndexingRunContext {
+        if reason.localizedCaseInsensitiveContains("background") {
+            return .backgroundTask
+        }
+        if reason.localizedCaseInsensitiveContains("manual") {
+            return .manualRefresh
+        }
+        return .foreground
     }
 
     private func process(asset: PhotoAssetSummary, photoLibraryStore: PhotoLibraryStore) async throws -> FaceAssetProcessingResult {
@@ -361,7 +461,10 @@ final class FaceRecognitionStore {
                 embeddingDuration: 0,
                 detectedFaceCount: 0,
                 skippedCropCount: 0,
-                imageUnavailable: true
+                imageUnavailable: true,
+                detectorBackendCounts: [:],
+                yunetFailureCount: 0,
+                visionFallbackCount: 0
             )
         }
         let imageRequestDuration = Date().timeIntervalSince(imageStartedAt)
@@ -373,7 +476,7 @@ final class FaceRecognitionStore {
             orientation: processingImage.orientation
         )
         let detectionDuration = Date().timeIntervalSince(detectionStartedAt)
-        Diagnostics.shared.log("Face indexing asset \(asset.id): Vision detected \(detectedFaces.count) faces in \(Self.durationText(since: detectionStartedAt)).")
+        Diagnostics.shared.log("Face indexing asset \(asset.id): detected \(detectedFaces.count) faces in \(Self.durationText(since: detectionStartedAt)); backends \(Self.backendCountsText(for: detectedFaces)).")
 
         var observations: [FaceObservationInput] = []
         observations.reserveCapacity(detectedFaces.count)
@@ -394,7 +497,13 @@ final class FaceRecognitionStore {
             let embeddingStartedAt = Date()
             let embedding = try await embeddingService.embedding(
                 for: crop.modelInputImage,
-                debugIdentifier: "\(asset.id)_face\(index + 1)"
+                debugIdentifier: "\(asset.id)_face\(index + 1)",
+                debugMetadata: FaceEmbeddingDebugMetadata(
+                    detectorBackend: detectedFace.backend,
+                    detectorRow: detectedFace.detectorRow,
+                    alignmentMethod: crop.alignmentMethod,
+                    alignmentQuality: crop.alignmentQuality
+                )
             )
             embeddingDuration += Date().timeIntervalSince(embeddingStartedAt)
             Diagnostics.shared.log("Face crop diagnostics asset \(asset.id), face \(index + 1): modelCrop \(crop.modelInputImage.width)x\(crop.modelInputImage.height), alignment \(crop.alignmentMethod.rawValue), quality \(crop.alignmentQuality), confidence \(detectedFace.confidence).")
@@ -408,6 +517,8 @@ final class FaceRecognitionStore {
                 leftToRightIndex: index,
                 detectionConfidence: detectedFace.confidence,
                 faceQuality: detectedFace.quality ?? crop.qualityScore,
+                detectorBackend: detectedFace.backend,
+                detectorRow: detectedFace.detectorRow,
                 embedding: embedding,
                 faceCropImageData: crop.avatarImageData
             ))
@@ -420,18 +531,20 @@ final class FaceRecognitionStore {
             embeddingDuration: embeddingDuration,
             detectedFaceCount: detectedFaces.count,
             skippedCropCount: skippedCropCount,
-            imageUnavailable: false
+            imageUnavailable: false,
+            detectorBackendCounts: Self.backendCounts(for: detectedFaces),
+            yunetFailureCount: detectionService.lastDetectionYuNetFailureCount,
+            visionFallbackCount: detectionService.lastDetectionUsedVisionFallback ? 1 : 0
         )
     }
 
-    private func saveAndCluster(_ observations: [FaceObservationInput], asset: PhotoAssetSummary) {
+    private func saveExtractedObservations(_ observations: [FaceObservationInput], asset: PhotoAssetSummary) {
         let previousPersonIDs = Set((faceIDsByAssetID[asset.id] ?? []).compactMap { facesByID[$0]?.personID })
         removeFaces(forAssetID: asset.id)
         for personID in previousPersonIDs {
             deletePersonIfEmpty(personID)
         }
 
-        var personIDsAssignedInCurrentAsset = Set<UUID>()
         var savedObservationCount = 0
         for observation in observations {
             guard observation.embedding.count == configuration.embeddingDimension,
@@ -449,74 +562,23 @@ final class FaceRecognitionStore {
             let healthReport = embeddingHealthMonitor.report()
             logEmbeddingHealthIfReady(healthReport)
 
-            let clusters = clusterSnapshots()
-            let excludedPersonIDs: Set<UUID> = configuration.disallowMultipleFacesFromSameAssetForSamePerson
-                ? personIDsAssignedInCurrentAsset
-                : []
-            let bestCandidate = clusteringEngine.bestCandidate(
-                for: observation.embedding,
-                clusters: clusters,
-                excluding: excludedPersonIDs
-            )
-            let shouldDisableAutoClustering = configuration.disableAutoClusteringWhenEmbeddingHealthSuspicious &&
-                (healthReport.status == .suspiciousCollapsed || healthReport.status == .suspiciousNoisy)
-            let assignment = shouldDisableAutoClustering
-                ? FaceClusterAssignment(kind: .deferredProvisional(bestPersonID: bestCandidate?.personID, similarity: bestCandidate?.similarity))
-                : clusteringEngine.assignment(
-                    for: observation.embedding,
-                    clusters: clusters,
-                    excluding: excludedPersonIDs
-                )
-            let personID: UUID
-            let isProvisional: Bool
-
-            switch assignment.kind {
-            case let .existingPerson(existingID, _):
-                assignmentDecisionCounts.existingPerson += 1
-                personID = existingID
-                isProvisional = false
-            case .newPerson, .ambiguous:
-                if case .newPerson = assignment.kind {
-                    assignmentDecisionCounts.newPerson += 1
-                } else {
-                    assignmentDecisionCounts.ambiguous += 1
-                }
-                personID = UUID()
-                isProvisional = observations.count > 1
-                persons[personID] = StoredPerson(id: personID, name: nil, isProvisional: isProvisional)
-            case .deferredProvisional:
-                assignmentDecisionCounts.deferredProvisional += 1
-                personID = UUID()
-                isProvisional = true
-                persons[personID] = StoredPerson(id: personID, name: nil, isProvisional: true)
-                if shouldDisableAutoClustering {
-                    faceRecognitionHealthMessage = "Face recognition embeddings look too similar. Picscry paused auto-grouping to avoid incorrect people."
-                    if !didLogSuspiciousEmbeddingHealthThisRun {
-                        didLogSuspiciousEmbeddingHealthThisRun = true
-                        Diagnostics.shared.log("Face embedding health suspicious: \(healthReport.status), sampleCount \(healthReport.sampleCount), median \(healthReport.medianSimilarity?.description ?? "unknown"), min \(healthReport.minSimilarity?.description ?? "unknown"), max \(healthReport.maxSimilarity?.description ?? "unknown"); disabling auto-clustering.")
-                    }
-                } else {
-                    Diagnostics.shared.log("Face clustering deferred provisional for asset \(asset.id), face \(observation.leftToRightIndex + 1): insufficient best-vs-second-best margin.")
+            if configuration.disableAutoClusteringWhenEmbeddingHealthSuspicious &&
+                (healthReport.status == .suspiciousCollapsed || healthReport.status == .suspiciousNoisy) {
+                faceRecognitionHealthMessage = "Face recognition embeddings look too similar. Picscry paused auto-grouping to avoid incorrect people."
+                if !didLogSuspiciousEmbeddingHealthThisRun {
+                    didLogSuspiciousEmbeddingHealthThisRun = true
+                    Diagnostics.shared.log("Face embedding health suspicious: \(healthReport.status), sampleCount \(healthReport.sampleCount), median \(healthReport.medianSimilarity?.description ?? "unknown"), min \(healthReport.minSimilarity?.description ?? "unknown"), max \(healthReport.maxSimilarity?.description ?? "unknown"); clustering will keep extracted observations provisional.")
                 }
             }
 
-            let face = StoredFaceObservation(input: observation, personID: personID)
+            let face = StoredFaceObservation(input: observation, personID: nil)
             facesByID[face.id] = face
             faceIDsByAssetID[asset.id, default: []].append(face.id)
-            addFaceToPersonIndex(face)
-            recompute(personID: personID)
-            personIDsAssignedInCurrentAsset.insert(personID)
             savedObservationCount += 1
-            Diagnostics.shared.log("Face clustering asset \(asset.id), face \(observation.leftToRightIndex + 1): best similarity \(bestCandidate?.similarity.description ?? "none"), excluded \(excludedPersonIDs.count), assigned person \(personID), provisional \(isProvisional), assignment \(assignment.kind).")
+            Diagnostics.shared.log("Face extraction asset \(asset.id), face \(observation.leftToRightIndex + 1): saved unclustered observation, detector \(observation.detectorBackend.rawValue), confidence \(observation.detectionConfidence).")
         }
 
         indexRecords[asset.id] = AssetIndexRecord(asset: asset, faceCount: savedObservationCount)
-        if configuration.incrementalClusterRebuildEnabled,
-           savedObservationCount > 0,
-           (facesByID.count.isMultiple(of: configuration.clusterRebuildBatchSize) ||
-            facesByID.count.isMultiple(of: configuration.batchMergeIntervalFaceCount)) {
-            rebuildAutomaticClusters(reason: "batch \(facesByID.count)")
-        }
     }
 
     private func assetNeedsIndex(_ asset: PhotoAssetSummary) -> Bool {
@@ -529,7 +591,9 @@ final class FaceRecognitionStore {
     private func summaries(forAssetID assetID: String) -> [PhotoFaceSummary] {
         (faceIDsByAssetID[assetID] ?? [])
             .compactMap { faceID -> PhotoFaceSummary? in
-                guard let face = facesByID[faceID], let person = persons[face.personID] else { return nil }
+                guard let face = facesByID[faceID],
+                      let personID = face.personID,
+                      let person = persons[personID] else { return nil }
                 return PhotoFaceSummary(
                     id: face.id,
                     personID: person.id,
@@ -678,24 +742,26 @@ final class FaceRecognitionStore {
     }
 
     private func addFaceToPersonIndex(_ face: StoredFaceObservation) {
-        faceIDsByPersonID[face.personID, default: []].insert(face.id)
-        assetIDsByPersonID[face.personID, default: []].insert(face.assetLocalIdentifier)
+        guard let personID = face.personID else { return }
+        faceIDsByPersonID[personID, default: []].insert(face.id)
+        assetIDsByPersonID[personID, default: []].insert(face.assetLocalIdentifier)
         if face.isManuallyCorrected {
-            manuallyCorrectedFaceCountsByPersonID[face.personID, default: 0] += 1
+            manuallyCorrectedFaceCountsByPersonID[personID, default: 0] += 1
         }
-        representativeQualityByPersonID[face.personID] = max(
-            representativeQualityByPersonID[face.personID] ?? 0,
+        representativeQualityByPersonID[personID] = max(
+            representativeQualityByPersonID[personID] ?? 0,
             score(face)
         )
     }
 
     private func removeFaceFromPersonIndex(_ face: StoredFaceObservation) {
-        faceIDsByPersonID[face.personID]?.remove(face.id)
-        manuallyCorrectedFaceCountsByPersonID[face.personID] = max(
+        guard let personID = face.personID else { return }
+        faceIDsByPersonID[personID]?.remove(face.id)
+        manuallyCorrectedFaceCountsByPersonID[personID] = max(
             0,
-            (manuallyCorrectedFaceCountsByPersonID[face.personID] ?? 0) - (face.isManuallyCorrected ? 1 : 0)
+            (manuallyCorrectedFaceCountsByPersonID[personID] ?? 0) - (face.isManuallyCorrected ? 1 : 0)
         )
-        rebuildAggregateIndex(for: face.personID)
+        rebuildAggregateIndex(for: personID)
     }
 
     private func moveFaceIndex(_ faceID: UUID, to personID: UUID, isManuallyCorrected: Bool? = nil) {
@@ -709,7 +775,9 @@ final class FaceRecognitionStore {
         face.updatedAt = .now
         facesByID[faceID] = face
         addFaceToPersonIndex(face)
-        rebuildAggregateIndex(for: oldPersonID)
+        if let oldPersonID {
+            rebuildAggregateIndex(for: oldPersonID)
+        }
         rebuildAggregateIndex(for: personID)
     }
 
@@ -752,9 +820,14 @@ final class FaceRecognitionStore {
     private func rebuildAutomaticClusters(reason: String) {
         let candidates = facesByID.values
             .filter { face in
-                guard let person = persons[face.personID] else { return false }
-                return person.isAutomaticCluster &&
-                    person.isUnknown &&
+                let isEligiblePerson: Bool
+                if let personID = face.personID {
+                    guard let person = persons[personID] else { return false }
+                    isEligiblePerson = person.isAutomaticCluster && person.isUnknown
+                } else {
+                    isEligiblePerson = true
+                }
+                return isEligiblePerson &&
                     !face.isManuallyCorrected &&
                     face.embedding.count == configuration.embeddingDimension &&
                     face.embedding.allSatisfy(\.isFinite)
@@ -771,7 +844,7 @@ final class FaceRecognitionStore {
         let healthReport = embeddingHealthMonitor.report()
         let shouldDisableAutoClustering = configuration.disableAutoClusteringWhenEmbeddingHealthSuspicious &&
             (healthReport.status == .suspiciousCollapsed || healthReport.status == .suspiciousNoisy)
-        let oldAutomaticPersonIDs = Set(candidates.map(\.personID))
+        let oldAutomaticPersonIDs = Set(candidates.compactMap(\.personID))
         let components: [FaceClusteringComponent]
         let initialComponents: [FaceClusteringComponent]
         var mergeStats = FaceClusterMergeStats()
@@ -816,6 +889,7 @@ final class FaceRecognitionStore {
         }
 
         var newAutomaticPersonIDs: [UUID] = []
+        var assignmentCounts = FaceAssignmentDecisionCounts()
         for component in components {
             let componentFaces = component.nodeIDs.compactMap { facesByID[$0] }
             guard !componentFaces.isEmpty else { continue }
@@ -834,7 +908,9 @@ final class FaceRecognitionStore {
                 facesByID[faceID]?.personID = personID
                 facesByID[faceID]?.updatedAt = .now
             }
+            assignmentCounts.newPerson += 1
         }
+        assignmentDecisionCounts = assignmentCounts
 
         rebuildFaceIndexes()
 
@@ -1041,10 +1117,11 @@ final class FaceRecognitionStore {
     private func removeFaces(forAssetID assetID: String) {
         for faceID in faceIDsByAssetID[assetID] ?? [] {
             if let face = facesByID[faceID] {
-                let personID = face.personID
                 removeFaceFromPersonIndex(face)
                 facesByID[faceID] = nil
-                recompute(personID: personID)
+                if let personID = face.personID {
+                    recompute(personID: personID)
+                }
             }
         }
         faceIDsByAssetID[assetID] = []
@@ -1069,16 +1146,16 @@ final class FaceRecognitionStore {
         do {
             let data = try Data(contentsOf: url)
             let snapshot = try JSONDecoder().decode(FaceDatabaseSnapshot.self, from: data)
-            if [7, 8, 9, 10].contains(snapshot.schemaVersion), FaceDatabaseSchema.currentVersion == 11 {
+            if (7...11).contains(snapshot.schemaVersion), FaceDatabaseSchema.currentVersion == 12 {
                 persons = Dictionary(uniqueKeysWithValues: snapshot.persons.map { ($0.id, $0) })
                 facesByID = Dictionary(uniqueKeysWithValues: snapshot.faces.map { ($0.id, $0) })
                 faceIDsByAssetID = snapshot.faceIDsByAssetID
                 indexRecords = snapshot.indexRecords
                 rebuildFaceIndexes()
-                rebuildAutomaticClusters(reason: "schema 11 complete-link clustering migration")
+                rebuildAutomaticClusters(reason: "schema 12 YuNet extraction clustering migration")
                 refreshPeople(persist: true, allowReorder: true)
-                lastIndexingSummary = "Face clustering was tightened to prevent chain-merged people. Picscry rebuilt automatic unknown people while preserving named people and manual corrections."
-                Diagnostics.shared.log("Migrated face database schema \(snapshot.schemaVersion) to 11 with complete-link clustering. People \(persons.count), faces \(facesByID.count).")
+                lastIndexingSummary = "Face detection and clustering were upgraded. Picscry rebuilt automatic unknown people while preserving named people and manual corrections."
+                Diagnostics.shared.log("Migrated face database schema \(snapshot.schemaVersion) to 12 with optional unclustered observations. People \(persons.count), faces \(facesByID.count).")
                 return
             }
 
@@ -1171,13 +1248,28 @@ final class FaceRecognitionStore {
         String(format: "%.2fs", Date().timeIntervalSince(startDate))
     }
 
+    private func unclusteredObservationCount() -> Int {
+        facesByID.values.filter { $0.personID == nil }.count
+    }
+
+    private static func backendCountsText(for faces: [DetectedFace]) -> String {
+        let counts = backendCounts(for: faces)
+        return FaceDetectionBackend.allCases
+            .map { "\($0.rawValue)=\(counts[$0] ?? 0)" }
+            .joined(separator: ", ")
+    }
+
+    private static func backendCounts(for faces: [DetectedFace]) -> [FaceDetectionBackend: Int] {
+        Dictionary(grouping: faces, by: \.backend).mapValues(\.count)
+    }
+
     private static func shortRunID(_ runID: UUID) -> String {
         String(runID.uuidString.prefix(8))
     }
 }
 
 private enum FaceDatabaseSchema {
-    static let currentVersion = 11
+    static let currentVersion = 12
 }
 
 private struct FaceThresholdDiagnostics: Codable {
@@ -1194,6 +1286,141 @@ private struct FaceThresholdDiagnostics: Codable {
     let batchMergeIntervalFaceCount: Int
 }
 
+private struct PendingFaceIndexingAsset {
+    let offset: Int
+    let asset: PhotoAssetSummary
+}
+
+private struct FaceIndexingWorkerCompletion {
+    let workerIndex: Int
+    let offset: Int
+    let asset: PhotoAssetSummary
+    let result: Result<FaceAssetProcessingResult, Error>
+}
+
+private actor FaceIndexingWorker {
+    private let id: Int
+    private let configuration: FaceRecognitionConfiguration
+    private let detectionService = FaceDetectionService()
+    private let embeddingService: FaceEmbeddingService
+    private let cropService = FaceCropService()
+
+    init(id: Int, configuration: FaceRecognitionConfiguration) {
+        self.id = id
+        self.configuration = configuration
+        embeddingService = FaceEmbeddingService(configuration: configuration)
+    }
+
+    func process(asset: PhotoAssetSummary, photoLibraryStore: PhotoLibraryStore) async throws -> FaceAssetProcessingResult {
+        try Task.checkCancellation()
+        let imageStartedAt = Date()
+        guard let processingImage = await photoLibraryStore.imageForFaceProcessing(
+            for: asset,
+            maxDimension: configuration.faceProcessingMaxDimension,
+            timeoutSeconds: configuration.faceImageRequestTimeoutSeconds
+        ) else {
+            Diagnostics.shared.log("Face worker \(id) asset \(asset.id): no processing image after \(Self.durationText(since: imageStartedAt)); recording zero faces.")
+            return FaceAssetProcessingResult(
+                observations: [],
+                imageRequestDuration: Date().timeIntervalSince(imageStartedAt),
+                detectionDuration: 0,
+                embeddingDuration: 0,
+                detectedFaceCount: 0,
+                skippedCropCount: 0,
+                imageUnavailable: true,
+                detectorBackendCounts: [:],
+                yunetFailureCount: 0,
+                visionFallbackCount: 0
+            )
+        }
+
+        let imageRequestDuration = Date().timeIntervalSince(imageStartedAt)
+        let detectionStartedAt = Date()
+        let detectedFaces = try await detectionService.detectFaces(
+            in: processingImage.cgImage,
+            orientation: processingImage.orientation
+        )
+        let detectionDuration = Date().timeIntervalSince(detectionStartedAt)
+        Diagnostics.shared.log("Face worker \(id) asset \(asset.id): detected \(detectedFaces.count) faces in \(Self.durationText(since: detectionStartedAt)); backends \(Self.backendCountsText(for: detectedFaces)).")
+
+        var observations: [FaceObservationInput] = []
+        observations.reserveCapacity(detectedFaces.count)
+        var embeddingDuration: TimeInterval = 0
+        var skippedCropCount = 0
+
+        for (index, detectedFace) in detectedFaces.enumerated() {
+            try Task.checkCancellation()
+            let faceStartedAt = Date()
+            guard let crop = cropService.cropFace(
+                from: processingImage.cgImage,
+                detectedFace: detectedFace,
+                configuration: configuration
+            ) else {
+                skippedCropCount += 1
+                Diagnostics.shared.log("Face worker \(id) asset \(asset.id): face \(index + 1)/\(detectedFaces.count) crop skipped.")
+                continue
+            }
+
+            let embeddingStartedAt = Date()
+            let embedding = try await embeddingService.embedding(
+                for: crop.modelInputImage,
+                debugIdentifier: "\(asset.id)_face\(index + 1)",
+                debugMetadata: FaceEmbeddingDebugMetadata(
+                    detectorBackend: detectedFace.backend,
+                    detectorRow: detectedFace.detectorRow,
+                    alignmentMethod: crop.alignmentMethod,
+                    alignmentQuality: crop.alignmentQuality
+                )
+            )
+            embeddingDuration += Date().timeIntervalSince(embeddingStartedAt)
+            Diagnostics.shared.log("Face worker \(id) crop diagnostics asset \(asset.id), face \(index + 1): modelCrop \(crop.modelInputImage.width)x\(crop.modelInputImage.height), alignment \(crop.alignmentMethod.rawValue), quality \(crop.alignmentQuality), confidence \(detectedFace.confidence), backend \(detectedFace.backend.rawValue).")
+            Diagnostics.shared.log("Face worker \(id) asset \(asset.id): face \(index + 1)/\(detectedFaces.count) embedded in \(Self.durationText(since: embeddingStartedAt)); total face time \(Self.durationText(since: faceStartedAt)).")
+            observations.append(FaceObservationInput(
+                assetLocalIdentifier: asset.id,
+                assetModificationDate: asset.modificationDate,
+                assetPixelWidth: asset.pixelWidth,
+                assetPixelHeight: asset.pixelHeight,
+                normalizedBoundingBox: detectedFace.normalizedBoundingBox,
+                leftToRightIndex: index,
+                detectionConfidence: detectedFace.confidence,
+                faceQuality: detectedFace.quality ?? crop.qualityScore,
+                detectorBackend: detectedFace.backend,
+                detectorRow: detectedFace.detectorRow,
+                embedding: embedding,
+                faceCropImageData: crop.avatarImageData
+            ))
+        }
+
+        return FaceAssetProcessingResult(
+            observations: observations,
+            imageRequestDuration: imageRequestDuration,
+            detectionDuration: detectionDuration,
+            embeddingDuration: embeddingDuration,
+            detectedFaceCount: detectedFaces.count,
+            skippedCropCount: skippedCropCount,
+            imageUnavailable: false,
+            detectorBackendCounts: Self.backendCounts(for: detectedFaces),
+            yunetFailureCount: detectionService.lastDetectionYuNetFailureCount,
+            visionFallbackCount: detectionService.lastDetectionUsedVisionFallback ? 1 : 0
+        )
+    }
+
+    private static func durationText(since startDate: Date) -> String {
+        String(format: "%.2fs", Date().timeIntervalSince(startDate))
+    }
+
+    private static func backendCountsText(for faces: [DetectedFace]) -> String {
+        let counts = backendCounts(for: faces)
+        return FaceDetectionBackend.allCases
+            .map { "\($0.rawValue)=\(counts[$0] ?? 0)" }
+            .joined(separator: ", ")
+    }
+
+    private static func backendCounts(for faces: [DetectedFace]) -> [FaceDetectionBackend: Int] {
+        Dictionary(grouping: faces, by: \.backend).mapValues(\.count)
+    }
+}
+
 private struct FaceAssetProcessingResult {
     let observations: [FaceObservationInput]
     let imageRequestDuration: TimeInterval
@@ -1202,6 +1429,9 @@ private struct FaceAssetProcessingResult {
     let detectedFaceCount: Int
     let skippedCropCount: Int
     let imageUnavailable: Bool
+    let detectorBackendCounts: [FaceDetectionBackend: Int]
+    let yunetFailureCount: Int
+    let visionFallbackCount: Int
 }
 
 private struct FaceIndexingPerformanceMetrics {
@@ -1219,6 +1449,10 @@ private struct FaceIndexingPerformanceMetrics {
     var detectionMaxDuration: TimeInterval = 0
     var embeddingTotalDuration: TimeInterval = 0
     var embeddingMaxAssetDuration: TimeInterval = 0
+    var detectorBackendCounts: [String: Int] = [:]
+    var yunetFailureCount = 0
+    var visionFallbackCount = 0
+    var workerLimitHistory: [FaceIndexingWorkerLimitSample] = []
 
     mutating func record(_ result: FaceAssetProcessingResult) {
         processedImageCount += 1
@@ -1234,20 +1468,42 @@ private struct FaceIndexingPerformanceMetrics {
         detectionMaxDuration = max(detectionMaxDuration, result.detectionDuration)
         embeddingTotalDuration += result.embeddingDuration
         embeddingMaxAssetDuration = max(embeddingMaxAssetDuration, result.embeddingDuration)
+        for (backend, count) in result.detectorBackendCounts {
+            detectorBackendCounts[backend.rawValue, default: 0] += count
+        }
+        yunetFailureCount += result.yunetFailureCount
+        visionFallbackCount += result.visionFallbackCount
+    }
+
+    mutating func recordWorkerLimit(_ workerLimit: Int, processedImageCount: Int) {
+        let sample = FaceIndexingWorkerLimitSample(
+            processedImageCount: processedImageCount,
+            workerLimit: workerLimit,
+            thermalState: FaceIndexingWorkerLimitSample.thermalStateText(ProcessInfo.processInfo.thermalState),
+            lowPowerModeEnabled: ProcessInfo.processInfo.isLowPowerModeEnabled
+        )
+        if workerLimitHistory.last != sample {
+            workerLimitHistory.append(sample)
+        }
     }
 
     func snapshot(
         reason: String,
         completed: Bool,
         duration: TimeInterval,
+        extractionDuration: TimeInterval,
+        clusteringDuration: TimeInterval,
         totalFaces: Int,
-        visiblePeople: Int
+        visiblePeople: Int,
+        unclusteredObservationCount: Int
     ) -> FaceIndexingPerformanceDiagnosticsSnapshot {
         FaceIndexingPerformanceDiagnosticsSnapshot(
             generatedAt: Date(),
             reason: reason,
             completed: completed,
             totalDuration: duration,
+            extractionDuration: extractionDuration,
+            clusteringDuration: clusteringDuration,
             totalEligibleImageCount: totalEligibleImageCount,
             alreadyIndexedCount: alreadyIndexedCount,
             pendingImageCount: pendingImageCount,
@@ -1265,6 +1521,11 @@ private struct FaceIndexingPerformanceMetrics {
             embeddingTotalDuration: embeddingTotalDuration,
             embeddingAverageDurationPerFace: embeddedFaceCount == 0 ? 0 : embeddingTotalDuration / Double(embeddedFaceCount),
             embeddingMaxAssetDuration: embeddingMaxAssetDuration,
+            detectorBackendCounts: detectorBackendCounts,
+            workerLimitHistory: workerLimitHistory,
+            yunetFailureCount: yunetFailureCount,
+            visionFallbackCount: visionFallbackCount,
+            unclusteredObservationCount: unclusteredObservationCount,
             totalPersistedFaceCount: totalFaces,
             visiblePeopleCount: visiblePeople
         )
@@ -1276,6 +1537,8 @@ private struct FaceIndexingPerformanceDiagnosticsSnapshot: Codable {
     let reason: String
     let completed: Bool
     let totalDuration: TimeInterval
+    let extractionDuration: TimeInterval
+    let clusteringDuration: TimeInterval
     let totalEligibleImageCount: Int
     let alreadyIndexedCount: Int
     let pendingImageCount: Int
@@ -1293,8 +1556,30 @@ private struct FaceIndexingPerformanceDiagnosticsSnapshot: Codable {
     let embeddingTotalDuration: TimeInterval
     let embeddingAverageDurationPerFace: TimeInterval
     let embeddingMaxAssetDuration: TimeInterval
+    let detectorBackendCounts: [String: Int]
+    let workerLimitHistory: [FaceIndexingWorkerLimitSample]
+    let yunetFailureCount: Int
+    let visionFallbackCount: Int
+    let unclusteredObservationCount: Int
     let totalPersistedFaceCount: Int
     let visiblePeopleCount: Int
+}
+
+private struct FaceIndexingWorkerLimitSample: Codable, Equatable {
+    let processedImageCount: Int
+    let workerLimit: Int
+    let thermalState: String
+    let lowPowerModeEnabled: Bool
+
+    static func thermalStateText(_ state: ProcessInfo.ThermalState) -> String {
+        switch state {
+        case .nominal: return "nominal"
+        case .fair: return "fair"
+        case .serious: return "serious"
+        case .critical: return "critical"
+        @unknown default: return "unknown"
+        }
+    }
 }
 
 private struct FaceAssignmentDecisionCounts: Codable {
@@ -1401,14 +1686,16 @@ private struct StoredFaceObservation: Codable {
     let leftToRightIndex: Int
     let detectionConfidence: Float
     let faceQuality: Float?
+    let detectorBackend: FaceDetectionBackend?
+    let detectorRow: [Float]?
     let embedding: [Float]
     let faceCropImageData: Data?
-    var personID: UUID
+    var personID: UUID?
     let createdAt = Date()
     var updatedAt = Date()
     var isManuallyCorrected = false
 
-    init(input: FaceObservationInput, personID: UUID) {
+    init(input: FaceObservationInput, personID: UUID?) {
         id = UUID()
         assetLocalIdentifier = input.assetLocalIdentifier
         assetModificationDate = input.assetModificationDate
@@ -1418,9 +1705,50 @@ private struct StoredFaceObservation: Codable {
         leftToRightIndex = input.leftToRightIndex
         detectionConfidence = input.detectionConfidence
         faceQuality = input.faceQuality
+        detectorBackend = input.detectorBackend
+        detectorRow = input.detectorRow
         embedding = input.embedding
         faceCropImageData = input.faceCropImageData
         self.personID = personID
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case assetLocalIdentifier
+        case assetModificationDate
+        case assetPixelWidth
+        case assetPixelHeight
+        case normalizedBoundingBox
+        case leftToRightIndex
+        case detectionConfidence
+        case faceQuality
+        case detectorBackend
+        case detectorRow
+        case embedding
+        case faceCropImageData
+        case personID
+        case updatedAt
+        case isManuallyCorrected
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        assetLocalIdentifier = try container.decode(String.self, forKey: .assetLocalIdentifier)
+        assetModificationDate = try container.decodeIfPresent(Date.self, forKey: .assetModificationDate)
+        assetPixelWidth = try container.decode(Int.self, forKey: .assetPixelWidth)
+        assetPixelHeight = try container.decode(Int.self, forKey: .assetPixelHeight)
+        normalizedBoundingBox = try container.decode(CGRect.self, forKey: .normalizedBoundingBox)
+        leftToRightIndex = try container.decode(Int.self, forKey: .leftToRightIndex)
+        detectionConfidence = try container.decode(Float.self, forKey: .detectionConfidence)
+        faceQuality = try container.decodeIfPresent(Float.self, forKey: .faceQuality)
+        detectorBackend = try container.decodeIfPresent(FaceDetectionBackend.self, forKey: .detectorBackend)
+        detectorRow = try container.decodeIfPresent([Float].self, forKey: .detectorRow)
+        embedding = try container.decode([Float].self, forKey: .embedding)
+        faceCropImageData = try container.decodeIfPresent(Data.self, forKey: .faceCropImageData)
+        personID = try container.decodeIfPresent(UUID.self, forKey: .personID)
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        isManuallyCorrected = try container.decodeIfPresent(Bool.self, forKey: .isManuallyCorrected) ?? false
     }
 }
 

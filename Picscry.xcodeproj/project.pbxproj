@@ -38,6 +38,8 @@
 		A1000000000000000000008D /* FaceAvatarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000009D /* FaceAvatarView.swift */; };
 		A1000000000000000000008E /* FaceEmbeddingModel.mlmodel in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000009E /* FaceEmbeddingModel.mlmodel */; };
 		A1000000000000000000008F /* SFace_LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000009F /* SFace_LICENSE.txt */; };
+		A100000000000000000000A2 /* FaceDetectionModel.mlmodel in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A4 /* FaceDetectionModel.mlmodel */; };
+		A100000000000000000000A3 /* YuNet_LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A5 /* YuNet_LICENSE.txt */; };
 		B20000000000000000000001 /* PicscryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000011 /* PicscryTests.swift */; };
 /* End PBXBuildFile section */
 
@@ -76,6 +78,8 @@
 		A1000000000000000000009D /* FaceAvatarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceAvatarView.swift; sourceTree = "<group>"; };
 		A1000000000000000000009E /* FaceEmbeddingModel.mlmodel */ = {isa = PBXFileReference; lastKnownFileType = file.mlmodel; path = FaceEmbeddingModel.mlmodel; sourceTree = "<group>"; };
 		A1000000000000000000009F /* SFace_LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = SFace_LICENSE.txt; sourceTree = "<group>"; };
+		A100000000000000000000A4 /* FaceDetectionModel.mlmodel */ = {isa = PBXFileReference; lastKnownFileType = file.mlmodel; path = FaceDetectionModel.mlmodel; sourceTree = "<group>"; };
+		A100000000000000000000A5 /* YuNet_LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = YuNet_LICENSE.txt; sourceTree = "<group>"; };
 		B2000000000000000000000D /* PicscryTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PicscryTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B20000000000000000000011 /* PicscryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PicscryTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -182,8 +186,10 @@
 		A10000000000000000000036 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				A100000000000000000000A4 /* FaceDetectionModel.mlmodel */,
 				A1000000000000000000009E /* FaceEmbeddingModel.mlmodel */,
 				A1000000000000000000009F /* SFace_LICENSE.txt */,
+				A100000000000000000000A5 /* YuNet_LICENSE.txt */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -289,6 +295,7 @@
 			files = (
 				A1000000000000000000000C /* Assets.xcassets in Resources */,
 				A1000000000000000000008F /* SFace_LICENSE.txt in Resources */,
+				A100000000000000000000A3 /* YuNet_LICENSE.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -334,6 +341,7 @@
 				A1000000000000000000008B /* PersonPickerView.swift in Sources */,
 				A1000000000000000000008C /* FaceChipRowView.swift in Sources */,
 				A1000000000000000000008D /* FaceAvatarView.swift in Sources */,
+				A100000000000000000000A2 /* FaceDetectionModel.mlmodel in Sources */,
 				A1000000000000000000008E /* FaceEmbeddingModel.mlmodel in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

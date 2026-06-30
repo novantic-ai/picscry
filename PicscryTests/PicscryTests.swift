@@ -714,6 +714,120 @@ final class PicscryTests: XCTestCase {
         XCTAssertEqual(channels.blue, 0, accuracy: 0.0001)
     }
 
+    func testYuNetRowParsingConvertsOpenCVRowToVisionStyleBoundingBox() throws {
+        let row: [Float] = [
+            64, 96, 160, 200,
+            104, 160,
+            184, 160,
+            144, 210,
+            112, 260,
+            176, 260,
+            0.93
+        ]
+
+        let detection = try XCTUnwrap(YuNetFaceDetectionService.decodedDetectionForTesting(
+            rawRow: row,
+            originalImageSize: CGSize(width: 640, height: 480),
+            inputScale: 1
+        ))
+
+        XCTAssertEqual(detection.pixelBoundingBox.origin.x, 64, accuracy: 0.0001)
+        XCTAssertEqual(detection.pixelBoundingBox.origin.y, 96, accuracy: 0.0001)
+        XCTAssertEqual(detection.pixelBoundingBox.width, 160, accuracy: 0.0001)
+        XCTAssertEqual(detection.pixelBoundingBox.height, 200, accuracy: 0.0001)
+        XCTAssertEqual(detection.normalizedBoundingBox.minX, 0.1, accuracy: 0.0001)
+        XCTAssertEqual(detection.normalizedBoundingBox.minY, 1 - (296.0 / 480.0), accuracy: 0.0001)
+        XCTAssertEqual(detection.landmarks.rightEye, CGPoint(x: 104, y: 160))
+        XCTAssertEqual(detection.landmarks.leftEye, CGPoint(x: 184, y: 160))
+        XCTAssertEqual(detection.landmarks.rightMouth, CGPoint(x: 112, y: 260))
+        XCTAssertEqual(detection.landmarks.leftMouth, CGPoint(x: 176, y: 260))
+        XCTAssertEqual(detection.score, 0.93, accuracy: 0.0001)
+    }
+
+    func testYuNetRowParsingScalesFromFixedModelInputToOriginalImage() throws {
+        let row: [Float] = [
+            64, 96, 160, 200,
+            104, 160,
+            184, 160,
+            144, 210,
+            112, 260,
+            176, 260,
+            0.91
+        ]
+
+        let detection = try XCTUnwrap(YuNetFaceDetectionService.decodedDetectionForTesting(
+            rawRow: row,
+            originalImageSize: CGSize(width: 1280, height: 960),
+            inputScale: 0.5
+        ))
+
+        XCTAssertEqual(detection.pixelBoundingBox.origin.x, 128, accuracy: 0.0001)
+        XCTAssertEqual(detection.pixelBoundingBox.origin.y, 192, accuracy: 0.0001)
+        XCTAssertEqual(detection.pixelBoundingBox.width, 320, accuracy: 0.0001)
+        XCTAssertEqual(detection.pixelBoundingBox.height, 400, accuracy: 0.0001)
+        XCTAssertEqual(detection.landmarks.noseTip, CGPoint(x: 288, y: 420))
+    }
+
+    func testFaceLandmarkFivePointUsesOpenCVSFaceRowOrder() {
+        let landmarks = FaceLandmarkFivePoint(
+            rightEye: CGPoint(x: 1, y: 2),
+            leftEye: CGPoint(x: 3, y: 4),
+            noseTip: CGPoint(x: 5, y: 6),
+            rightMouth: CGPoint(x: 7, y: 8),
+            leftMouth: CGPoint(x: 9, y: 10)
+        )
+
+        XCTAssertEqual(landmarks.sfaceSourcePoints, [
+            CGPoint(x: 1, y: 2),
+            CGPoint(x: 3, y: 4),
+            CGPoint(x: 5, y: 6),
+            CGPoint(x: 7, y: 8),
+            CGPoint(x: 9, y: 10)
+        ])
+    }
+
+    func testAdaptiveWorkerPolicyUsesOneWorkerForBackgroundLowPowerOrHotDevice() {
+        XCTAssertEqual(FaceIndexingWorkerPolicy.workerLimit(
+            context: .backgroundTask,
+            thermalState: .nominal,
+            isLowPowerModeEnabled: false,
+            processorCount: 8
+        ), 1)
+        XCTAssertEqual(FaceIndexingWorkerPolicy.workerLimit(
+            context: .foreground,
+            thermalState: .nominal,
+            isLowPowerModeEnabled: true,
+            processorCount: 8
+        ), 1)
+        XCTAssertEqual(FaceIndexingWorkerPolicy.workerLimit(
+            context: .foreground,
+            thermalState: .serious,
+            isLowPowerModeEnabled: false,
+            processorCount: 8
+        ), 1)
+    }
+
+    func testAdaptiveWorkerPolicyUsesThreeWorkersOnlyForCoolForegroundCapableDevices() {
+        XCTAssertEqual(FaceIndexingWorkerPolicy.workerLimit(
+            context: .foreground,
+            thermalState: .nominal,
+            isLowPowerModeEnabled: false,
+            processorCount: 6
+        ), 3)
+        XCTAssertEqual(FaceIndexingWorkerPolicy.workerLimit(
+            context: .manualRefresh,
+            thermalState: .fair,
+            isLowPowerModeEnabled: false,
+            processorCount: 8
+        ), 3)
+        XCTAssertEqual(FaceIndexingWorkerPolicy.workerLimit(
+            context: .foreground,
+            thermalState: .nominal,
+            isLowPowerModeEnabled: false,
+            processorCount: 4
+        ), 2)
+    }
+
     func testPeopleSortingNamedFirstThenUnknownByPhotoCount() {
         let alpha = PersonSummary(id: UUID(), displayName: "Ana", isUnknown: false, photoCount: 1, faceCount: 1, representativeFaceImageData: nil)
         let zed = PersonSummary(id: UUID(), displayName: "Zed", isUnknown: false, photoCount: 1, faceCount: 1, representativeFaceImageData: nil)
