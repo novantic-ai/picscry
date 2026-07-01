@@ -14,7 +14,6 @@ actor FaceEmbeddingService {
     private var didLogModelOutput = false
     private var didLogEmbeddingStats = false
     private var loggedInputStatsCount = 0
-    private var debugExportCount = 0
     private var rawFeatureSamples: [[Float]] = []
 
     init(configuration: FaceRecognitionConfiguration = FaceRecognitionConfiguration()) {
@@ -337,8 +336,7 @@ actor FaceEmbeddingService {
         debugIdentifier: String?,
         debugMetadata: FaceEmbeddingDebugMetadata?
     ) {
-        guard debugExportCount < 20 else { return }
-        debugExportCount += 1
+        guard let debugExportCount = Self.nextDebugExportIndex(limit: 20) else { return }
         let safeIdentifier = (debugIdentifier ?? "face").map { character in
             character.isLetter || character.isNumber ? character : "_"
         }.reduce(into: "") { $0.append($1) }
@@ -371,6 +369,17 @@ actor FaceEmbeddingService {
             .appendingPathComponent("Picscry", isDirectory: true)
             .appendingPathComponent("FaceEmbeddingDebug", isDirectory: true)
     }
+
+    private nonisolated static func nextDebugExportIndex(limit: Int) -> Int? {
+        debugExportQueue.sync {
+            guard globalDebugExportCount < limit else { return nil }
+            globalDebugExportCount += 1
+            return globalDebugExportCount
+        }
+    }
+
+    private nonisolated static let debugExportQueue = DispatchQueue(label: "com.novanticai.picscry.face-debug-export")
+    private nonisolated(unsafe) static var globalDebugExportCount = 0
 }
 
 private struct FaceEmbeddingInput {

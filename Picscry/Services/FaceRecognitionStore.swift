@@ -99,6 +99,18 @@ final class FaceRecognitionStore {
             return
         }
 
+        if shouldPauseAfterUncleanIndexingExit(
+            reason: reason,
+            fingerprint: currentFingerprint,
+            forceRestart: forceRestart
+        ) {
+            indexingState = .paused
+            currentIndexingMessage = nil
+            lastIndexingSummary = "Face indexing was paused because the previous indexing run did not exit cleanly. Use manual refresh to resume."
+            Diagnostics.shared.log("Face indexing paused on launch (\(reason)): previous run did not exit cleanly for the same library fingerprint.")
+            return
+        }
+
         if indexingState.isIndexing,
            activeIndexingAssetFingerprint != currentFingerprint {
             Diagnostics.shared.log("Face indexing cancelling active run (\(reason)): library fingerprint changed.")
@@ -124,6 +136,7 @@ final class FaceRecognitionStore {
             currentIndexingMessage = nil
             lastIndexingSummary = "All \(totalEligibleImageCount) photos are indexed. \(facesByID.count) faces across \(people.count) people."
             Diagnostics.shared.log("Face indexing skipped (\(reason)): no pending photos out of \(assets.count) image assets. Existing observations: \(facesByID.count).")
+            clearActiveIndexingRunMarker()
             scheduleBackgroundIndexing(reason: "no pending photos after \(reason)")
             return
         }
@@ -133,6 +146,7 @@ final class FaceRecognitionStore {
         activeIndexingAssetFingerprint = currentFingerprint
         didLogSuspiciousEmbeddingHealthThisRun = false
         assignmentDecisionCounts = FaceAssignmentDecisionCounts()
+        markIndexingRunActive(fingerprint: currentFingerprint, reason: reason, processedImageCount: alreadyIndexedCount)
         Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face indexing run started (\(reason)): \(pending.count) pending photos out of \(assets.count) image assets. Existing index records: \(indexRecords.count), people: \(persons.count), faces: \(facesByID.count).")
         scheduleBackgroundIndexing(reason: "indexing started from \(reason)")
 
@@ -279,6 +293,7 @@ final class FaceRecognitionStore {
                 indexingState = .paused
                 currentIndexingMessage = "Face indexing paused at \(processedOverall) of \(totalEligibleImageCount)."
                 savePersistedState()
+                clearActiveIndexingRunMarker()
                 saveIndexingPerformanceDiagnostics(performanceMetrics.snapshot(
                     reason: reason,
                     completed: false,
@@ -324,6 +339,7 @@ final class FaceRecognitionStore {
                     indexingState = .paused
                     currentIndexingMessage = "Face indexing paused at \(processedOverall) of \(totalEligibleImageCount)."
                     savePersistedState()
+                    clearActiveIndexingRunMarker()
                     saveIndexingPerformanceDiagnostics(performanceMetrics.snapshot(
                         reason: reason,
                         completed: false,
@@ -354,10 +370,13 @@ final class FaceRecognitionStore {
 
                 if processedThisRun.isMultiple(of: configuration.databaseSaveBatchSize) {
                     savePersistedState()
+                    markIndexingRunActive(fingerprint: activeIndexingAssetFingerprint ?? "", reason: reason, processedImageCount: processedOverall)
                 }
             }
 
             chunkStart = chunkEnd
+            savePersistedState()
+            markIndexingRunActive(fingerprint: activeIndexingAssetFingerprint ?? "", reason: reason, processedImageCount: processedOverall)
             await Task.yield()
         }
 
@@ -383,6 +402,7 @@ final class FaceRecognitionStore {
         activeIndexingAssetFingerprint = nil
         currentIndexingMessage = nil
         lastIndexingSummary = "Indexed \(processedThisRun) photos in \(Self.durationText(since: indexingStartedAt)). \(facesByID.count) faces across \(people.count) people."
+        clearActiveIndexingRunMarker()
         Diagnostics.shared.log("[FaceRun \(Self.shortRunID(runID))] Face indexing finished (\(reason)) at \(processedOverall)/\(totalEligibleImageCount) photos in \(Self.durationText(since: indexingStartedAt)) with \(facesByID.count) face observations across \(people.count) people.")
     }
 
@@ -443,7 +463,7 @@ final class FaceRecognitionStore {
         if reason.localizedCaseInsensitiveContains("manual") {
             return .manualRefresh
         }
-        return .foreground
+        return .foregroundAutomatic
     }
 
     private func process(asset: PhotoAssetSummary, photoLibraryStore: PhotoLibraryStore) async throws -> FaceAssetProcessingResult {
@@ -1248,6 +1268,49 @@ final class FaceRecognitionStore {
         String(format: "%.2fs", Date().timeIntervalSince(startDate))
     }
 
+    private func shouldPauseAfterUncleanIndexingExit(
+        reason: String,
+        fingerprint: String,
+        forceRestart: Bool
+    ) -> Bool {
+        if forceRestart {
+            clearActiveIndexingRunMarker()
+            return false
+        }
+        guard indexingRunContext(for: reason) == .foregroundAutomatic else { return false }
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: Self.activeIndexingRunMarkerKey),
+              defaults.string(forKey: Self.activeIndexingFingerprintKey) == fingerprint else {
+            return false
+        }
+
+        let updatedAt = defaults.object(forKey: Self.activeIndexingUpdatedAtKey) as? Date ?? .distantPast
+        if Date().timeIntervalSince(updatedAt) > 24 * 60 * 60 {
+            clearActiveIndexingRunMarker()
+            return false
+        }
+        return true
+    }
+
+    private func markIndexingRunActive(fingerprint: String, reason: String, processedImageCount: Int) {
+        guard !fingerprint.isEmpty else { return }
+        let defaults = UserDefaults.standard
+        defaults.set(true, forKey: Self.activeIndexingRunMarkerKey)
+        defaults.set(fingerprint, forKey: Self.activeIndexingFingerprintKey)
+        defaults.set(Date(), forKey: Self.activeIndexingUpdatedAtKey)
+        defaults.set(reason, forKey: Self.activeIndexingReasonKey)
+        defaults.set(processedImageCount, forKey: Self.activeIndexingProcessedCountKey)
+    }
+
+    private func clearActiveIndexingRunMarker() {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: Self.activeIndexingRunMarkerKey)
+        defaults.removeObject(forKey: Self.activeIndexingFingerprintKey)
+        defaults.removeObject(forKey: Self.activeIndexingUpdatedAtKey)
+        defaults.removeObject(forKey: Self.activeIndexingReasonKey)
+        defaults.removeObject(forKey: Self.activeIndexingProcessedCountKey)
+    }
+
     private func unclusteredObservationCount() -> Int {
         facesByID.values.filter { $0.personID == nil }.count
     }
@@ -1266,6 +1329,12 @@ final class FaceRecognitionStore {
     private static func shortRunID(_ runID: UUID) -> String {
         String(runID.uuidString.prefix(8))
     }
+
+    private static let activeIndexingRunMarkerKey = "FaceRecognition.activeIndexingRun"
+    private static let activeIndexingFingerprintKey = "FaceRecognition.activeIndexingFingerprint"
+    private static let activeIndexingUpdatedAtKey = "FaceRecognition.activeIndexingUpdatedAt"
+    private static let activeIndexingReasonKey = "FaceRecognition.activeIndexingReason"
+    private static let activeIndexingProcessedCountKey = "FaceRecognition.activeIndexingProcessedCount"
 }
 
 private enum FaceDatabaseSchema {

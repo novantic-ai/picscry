@@ -794,34 +794,37 @@ final class PicscryTests: XCTestCase {
             processorCount: 8
         ), 1)
         XCTAssertEqual(FaceIndexingWorkerPolicy.workerLimit(
-            context: .foreground,
+            context: .foregroundAutomatic,
             thermalState: .nominal,
             isLowPowerModeEnabled: true,
             processorCount: 8
         ), 1)
         XCTAssertEqual(FaceIndexingWorkerPolicy.workerLimit(
-            context: .foreground,
+            context: .foregroundAutomatic,
             thermalState: .serious,
             isLowPowerModeEnabled: false,
             processorCount: 8
         ), 1)
     }
 
-    func testAdaptiveWorkerPolicyUsesThreeWorkersOnlyForCoolForegroundCapableDevices() {
+    func testAdaptiveWorkerPolicyKeepsAutomaticForegroundSerial() {
         XCTAssertEqual(FaceIndexingWorkerPolicy.workerLimit(
-            context: .foreground,
+            context: .foregroundAutomatic,
             thermalState: .nominal,
             isLowPowerModeEnabled: false,
-            processorCount: 6
-        ), 3)
+            processorCount: 8
+        ), 1)
+    }
+
+    func testAdaptiveWorkerPolicyUsesTwoWorkersOnlyForCoolManualRefreshCapableDevices() {
         XCTAssertEqual(FaceIndexingWorkerPolicy.workerLimit(
             context: .manualRefresh,
             thermalState: .fair,
             isLowPowerModeEnabled: false,
             processorCount: 8
-        ), 3)
+        ), 2)
         XCTAssertEqual(FaceIndexingWorkerPolicy.workerLimit(
-            context: .foreground,
+            context: .manualRefresh,
             thermalState: .nominal,
             isLowPowerModeEnabled: false,
             processorCount: 4

@@ -24,7 +24,7 @@ struct FaceRecognitionConfiguration {
     var embeddingDimension = 128
     var faceImageRequestTimeoutSeconds: TimeInterval = 45
     var peopleRefreshBatchSize: Int = 50
-    var databaseSaveBatchSize: Int = 100
+    var databaseSaveBatchSize: Int = 25
     var batchMergeIntervalFaceCount: Int = 150
     var fullMergeAfterIndexing = true
     var backgroundMergeEnabled = true
@@ -120,7 +120,7 @@ struct FaceObservationInput {
 }
 
 enum FaceIndexingRunContext: String, Codable {
-    case foreground
+    case foregroundAutomatic
     case manualRefresh
     case backgroundTask
 }
@@ -139,13 +139,13 @@ enum FaceIndexingWorkerPolicy {
             return 1
         }
 
-        if (context == .foreground || context == .manualRefresh),
+        if context == .manualRefresh,
            (thermalState == .nominal || thermalState == .fair),
            processorCount >= 6 {
-            return 3
+            return 2
         }
 
-        return 2
+        return context == .manualRefresh ? 2 : 1
     }
 }
 
